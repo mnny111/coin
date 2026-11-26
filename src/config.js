@@ -1,7 +1,7 @@
 import { PublicKey } from '@solana/web3.js';
 import { resolve } from 'node:path';
 
-export function config(env = process.env, savedMint) {
+export function config(env = process.env, savedMint, {requireLiveConfig=true} = {}) {
   if(savedMint!==undefined&&savedMint!==null)env={...env,COIN_MINT:savedMint};
   const integer = (key, fallback, min, max) => {
     const n = Number(env[key] ?? fallback);
@@ -47,6 +47,6 @@ export function config(env = process.env, savedMint) {
   if (BigInt(c.maxBuyback) <= 0n || BigInt(c.maxBuyback) < BigInt(c.minBuyback)) throw new Error('Buyback maximum below minimum');
   if(c.nestedPrivateKey&&!c.nestedFeeWallet)throw new Error('NESTED_SIGNER_PRIVATE_KEY requires NESTED_FEE_WALLET');
   if(c.privateKey&&c.keyFile)throw new Error('Set only one of SIGNER_PRIVATE_KEY or SIGNER_KEY_FILE');
-  if (c.live && (!c.rpc || !c.mint || !c.creator || (!c.keyFile&&!c.privateKey) || !c.start || !c.dedicatedCreator)) throw new Error('Live mode requires RPC, mint, creator, SIGNER_PRIVATE_KEY or SIGNER_KEY_FILE, START_TIME and DEDICATED_CREATOR_CONFIRMED=true');
+  if (requireLiveConfig && c.live && (!c.rpc || !c.mint || !c.creator || (!c.keyFile&&!c.privateKey) || !c.dedicatedCreator)) throw new Error('Live mode requires RPC, mint, creator, SIGNER_PRIVATE_KEY or SIGNER_KEY_FILE and DEDICATED_CREATOR_CONFIRMED=true');
   return c;
 }

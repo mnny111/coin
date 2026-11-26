@@ -24,11 +24,19 @@ export function proportional(amount, weights) {
 export class Engine {
   constructor(store, config) {
     this.s=store; this.c=config;
+    store.transaction(()=>{
+    const savedStart=store.setting('indexStart');
+    if(savedStart)config.start=Number(savedStart);
+    else if(config.mint&&config.creator){
+      if(store.setting('policy')&&!config.start)throw new Error('Existing ledger needs its original START_TIME once to preserve accounting; it will then be saved automatically.');
+      config.start=config.start||nowSeconds();
+    }
     const policy = JSON.stringify({mint:config.mint,creator:config.creator,start:config.start,round:config.roundSeconds,buy:config.buybackBps,rewards:config.rewardsBps,pairPolicy:'all-volume-v1'});
     const hash=createHash('sha256').update(policy).digest('hex');
     const previous=store.setting('policy');
     if (previous && previous!==hash) throw new Error('Accounting policy changed. Use a new database or an explicit reviewed migration.');
-    if(config.mint&&config.creator&&config.start)store.setting('policy',hash);
+    if(config.mint&&config.creator&&config.start){store.setting('policy',hash);store.setting('indexStart',config.start);}
+    });
   }
   addPair(p) {
     if(p.mint===this.c.mint||p.mint===p.quote)return false;

@@ -163,3 +163,19 @@ test('pair search matches names and treats SQL wildcard input literally',async t
   const root=`http://127.0.0.1:${server.address().port}`;
   for(const [query,name] of [['alpha','Alpha'],['%','Percent%'],['_','Under_score']]){const result=await (await fetch(root+'/api/pairs?q='+encodeURIComponent(query))).json();assert.equal(result.total,1);assert.equal(result.items[0].name,name);}
 });
+
+test('automatic indexing start persists across restarts without START_TIME',()=>{
+ const store=new Store(':memory:');try{
+ const env={COIN_MINT:Keypair.generate().publicKey.toBase58(),CREATOR_ADDRESS:Keypair.generate().publicKey.toBase58()};
+ const first=config(env);new Engine(store,first);assert.ok(first.start>0);assert.equal(Number(store.setting('indexStart')),first.start);
+ const second=config(env);new Engine(store,second);assert.equal(second.start,first.start);
+ }finally{store.close();}
+});
+test('legacy ledger retains its boundary before START_TIME is removed',()=>{
+ const store=new Store(':memory:');try{
+ const env={COIN_MINT:Keypair.generate().publicKey.toBase58(),CREATOR_ADDRESS:Keypair.generate().publicKey.toBase58()};
+ new Engine(store,config({...env,START_TIME:'100'}));store.run("DELETE FROM settings WHERE key='indexStart'");
+ assert.throws(()=>new Engine(store,config(env)),/original START_TIME once/);
+ new Engine(store,config({...env,START_TIME:'100'}));const resumed=config(env);new Engine(store,resumed);assert.equal(resumed.start,100);
+ }finally{store.close();}
+});

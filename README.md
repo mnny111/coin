@@ -54,14 +54,12 @@ npm start
 
 The API starts at `http://127.0.0.1:3000` with empty data. `/health` explicitly reports that it is unconfigured. It never inserts demonstration trades or fake burns.
 
-Configure these four values in `.env` to start real read-only indexing:
+Save your mint in admin and configure these values in `.env` to start real read-only indexing:
 
 ```dotenv
 EXECUTION_MODE=observe
 SOLANA_RPC_URL=https://YOUR_ARCHIVAL_SOLANA_RPC
-COIN_MINT=YOUR_MAIN_COIN_ADDRESS
 CREATOR_ADDRESS=YOUR_DEDICATED_CREATOR_WALLET
-START_TIME=UNIX_SECONDS_AT_OR_BEFORE_YOUR_MAIN_COIN_LAUNCH
 ```
 
 Then run the worker in a second terminal:
@@ -70,7 +68,7 @@ Then run the worker in a second terminal:
 npm run worker
 ```
 
-Or run both processes under one supervisor:
+Or run the website with admin-controlled worker startup:
 
 ```powershell
 npm run service
@@ -78,7 +76,7 @@ npm run service
 
 Observation mode indexes and calculates rounds/jobs but **never reads a signing key, signs, or broadcasts**. Proposed jobs remain `planned`; they are not completed burns. When switching to live mode, previously planned buybacks are still obligations and will execute. Review the observed rounds before that switch.
 
-The RPC needs full transaction history from `START_TIME`, version-0 transaction support, inner instructions, and finalized block times. Missing transaction bodies stop cursor advancement and settlement. A provider that silently omits historical signatures can produce an incomplete index; use a trusted archival RPC. The polling indexer is intended for an initial deployment; throughput for thousands of active pairs has not been load-tested. A production deployment at that scale should use a durable Geyser/indexing feed and retain the same ledger contracts.
+The RPC needs full transaction history from the automatically saved indexing start, version-0 transaction support, inner instructions, and finalized block times. Missing transaction bodies stop cursor advancement and settlement. A provider that silently omits historical signatures can produce an incomplete index; use a trusted archival RPC. The polling indexer is intended for an initial deployment; throughput for thousands of active pairs has not been load-tested. A production deployment at that scale should use a durable Geyser/indexing feed and retain the same ledger contracts.
 
 ## Enable live execution
 
@@ -165,3 +163,9 @@ Set `NESTED_FEE_WALLET` and its matching base58 `NESTED_SIGNER_PRIVATE_KEY` in s
 A finalized authenticated distribution creates one durable burn obligation for its full parent-token amount. Each receipt has a deterministic job ID. Confirmed and failed jobs both prevent duplicate allocation; failures retain their obligation for explicit retry. Burns use SPL BurnChecked and are reported complete only after finalized balance reconciliation. Amounts are never mixed across parent mints or added to the main 70/30 SOL budget. Ordinary transfers/top-ups do not create burn obligations. Observe mode plans burns but does not load either signer or submit transactions. Missing nested credentials leave nested work queued without blocking main buybacks.
 
 Fee-share changes prevent new automatic collection; already-received fees remain burn obligations. Historical verified receipts in this database are included when enabling this feature. If tokens have been withdrawn since receipt, their burn fails rather than reducing the recorded obligation. No funded end-to-end mainnet execution has been performed.
+
+Indexing starts automatically when the mint and creator are configured at startup. The start is saved in the database and reused on restarts; older activity is not backfilled. START_TIME is no longer required for new installations. Existing ledgers must retain their original START_TIME for the first startup after upgrading, so their original boundary can be saved without changing accounting. It can then be removed.
+
+## Start the worker from admin
+
+Use `npm start` or `npm run service` to bring the website online. Neither automatically starts the worker. Unlock `/admin`, save the Coin mint, and click **Start worker**. Server-side RPC and wallet configuration still apply, and live mode executes real transactions. Status refreshes every ten seconds. A failed worker leaves the website online; correct its configuration and try again. After a server restart or redeployment, click Start worker again. `npm run worker` remains available for operators who explicitly want a standalone worker; the database lease prevents concurrent workers.

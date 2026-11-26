@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
+import { workerControl } from './worker-control.js';
 import { config } from './config.js';
 import { Store } from './store.js';
 import { Engine,nowSeconds } from './engine.js';
@@ -19,7 +20,7 @@ async function body(req) {
   for await(const chunk of req){text+=chunk;if(Buffer.byteLength(text)>4096)throw Object.assign(new Error('Body too large'),{status:413});}
   try{return JSON.parse(text||'{}');}catch{throw Object.assign(new Error('Invalid JSON'),{status:400});}
 }
-export function createApi(engine) {
+export function createApi(engine, control=null) {
   const s=engine.s,c=engine.c;
   const attempts=new Map();
   return createServer(async(req,res)=>{
@@ -76,9 +77,13 @@ export function createApi(engine) {
           });
           if(result.locked)return send(409,{error:'This ledger is already in use. Changing its mint requires a separate database or a reviewed migration.'});
           c.mint=mint;
-          return send(200,{mint,saved:!!result.saved,message:'Coin mint saved. Restart the worker to use the new configuration.'});
+          return send(200,{mint,saved:!!result.saved,message:'Coin mint saved. Use Start worker when you are ready.'});
         }
-        if(req.method==='GET'&&path==='/admin/status')return send(200,{paused:s.setting('paused')==='true',workerError:s.setting('workerError'),heartbeat:s.setting('workerHeartbeat'),jobs:s.all('SELECT id,status,error FROM jobs WHERE status!=\'confirmed\' LIMIT 100')});
+        if(req.method==='POST'&&path==='/admin/worker/start'){
+          if(!control)return send(503,{error:'Worker controls are unavailable in this server.'});
+          try{return send(200,control.start());}catch(error){return send(400,{error:error.message});}
+        }
+        if(req.method==='GET'&&path==='/admin/status')return send(200,{workerControl:control?.status()||null,paused:s.setting('paused')==='true',workerError:s.setting('workerError'),heartbeat:s.setting('workerHeartbeat'),jobs:s.all('SELECT id,status,error FROM jobs WHERE status!=\'confirmed\' LIMIT 100')});
         if(req.method==='POST'&&path==='/admin/pause') {
           const b=await body(req);if(typeof b.paused!=='boolean')return send(400,{error:'paused must be boolean'});
           s.transaction(()=>{s.setting('paused',b.paused);s.audit('pause',{paused:b.paused});});return send(200,{paused:b.paused});
@@ -98,9 +103,9 @@ export function createApi(engine) {
   });
 }
 function main() {
-  const s=new Store(resolve(process.env.DATABASE_PATH||'data/coin.sqlite')),c=config(process.env,s.setting('configuredMint')),engine=new Engine(s,c),server=createApi(engine);
+  const s=new Store(resolve(process.env.DATABASE_PATH||'data/coin.sqlite')),c=config(process.env,s.setting('configuredMint'),{requireLiveConfig:false}),engine=new Engine(s,c),control=workerControl(s),server=createApi(engine,control);
   server.requestTimeout=15000;server.headersTimeout=10000;
   server.listen(c.port,c.host,()=>console.log(`Coin API listening on http://${c.host}:${c.port}`));
-  const shutdown=()=>server.close(()=>{s.close();process.exit(0);});process.on('SIGTERM',shutdown);process.on('SIGINT',shutdown);
+  const shutdown=()=>{control.stop();server.close(()=>{s.close();process.exit(0);});};process.on('SIGTERM',shutdown);process.on('SIGINT',shutdown);
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)main();

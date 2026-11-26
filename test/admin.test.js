@@ -28,3 +28,9 @@ test('active worker lease prevents editing an unbound mint',async t=>{
 test('saved mint participates in live configuration validation',()=>{
  const address=mint();const c=config({EXECUTION_MODE:'live',SOLANA_RPC_URL:'http://127.0.0.1:8899',CREATOR_ADDRESS:mint(),START_TIME:'100',SIGNER_KEY_FILE:'secret.json',DEDICATED_CREATOR_CONFIRMED:'true'},address);assert.equal(c.mint,address);
 });
+
+test('website can start before live worker credentials and mint are configured',()=>{
+ const c=config({EXECUTION_MODE:'live'},undefined,{requireLiveConfig:false});
+ assert.equal(c.live,true);assert.equal(c.mint,null);
+ assert.throws(()=>config({EXECUTION_MODE:'live'}),/Live mode requires/);
+});
