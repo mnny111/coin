@@ -18,12 +18,13 @@ export function config(env = process.env, savedMint) {
     name: 'Coin', db: resolve(env.DATABASE_PATH || 'data/coin.sqlite'),
     port: integer('PORT', 3000, 1, 65535), host: env.HOST || '127.0.0.1',
     rpc: env.SOLANA_RPC_URL || null, mint: address('COIN_MINT'), creator: address('CREATOR_ADDRESS'),
-    keyFile: env.SIGNER_KEY_FILE || null, live: env.EXECUTION_MODE === 'live',
+    keyFile: env.SIGNER_KEY_FILE || null, privateKey: env.SIGNER_PRIVATE_KEY?.trim() || null, live: env.EXECUTION_MODE === 'live',
     dedicatedCreator: env.DEDICATED_CREATOR_CONFIRMED === 'true',
     adminPasscode: env.ADMIN_PASSCODE || '',
     nestedFeeWallet: address('NESTED_FEE_WALLET'),
+    nestedPrivateKey: env.NESTED_SIGNER_PRIVATE_KEY?.trim() || null,
     start: integer('START_TIME', 0, 0, 9999999999),
-    roundSeconds: integer('ROUND_SECONDS', 10800, 60, 86400),
+    roundSeconds: integer('ROUND_SECONDS', 300, 60, 86400),
     settlementDelay: integer('SETTLEMENT_DELAY_SECONDS', 120, 30, 3600),
     buybackBps: integer('BUYBACK_BPS', 7000, 0, 10000),
     rewardsBps: integer('PAIR_BUYBACK_BPS', 3000, 0, 10000),
@@ -39,6 +40,8 @@ export function config(env = process.env, savedMint) {
   if (env.EXECUTION_MODE && !['observe', 'live'].includes(env.EXECUTION_MODE)) throw new Error('Invalid EXECUTION_MODE');
   if (c.buybackBps + c.rewardsBps > 10000) throw new Error('Fee allocations exceed 100%');
   if (BigInt(c.maxBuyback) <= 0n || BigInt(c.maxBuyback) < BigInt(c.minBuyback)) throw new Error('Buyback maximum below minimum');
-  if (c.live && (!c.rpc || !c.mint || !c.creator || !c.keyFile || !c.start || !c.dedicatedCreator)) throw new Error('Live mode requires RPC, mint, creator, signer file, START_TIME and DEDICATED_CREATOR_CONFIRMED=true');
+  if(c.nestedPrivateKey&&!c.nestedFeeWallet)throw new Error('NESTED_SIGNER_PRIVATE_KEY requires NESTED_FEE_WALLET');
+  if(c.privateKey&&c.keyFile)throw new Error('Set only one of SIGNER_PRIVATE_KEY or SIGNER_KEY_FILE');
+  if (c.live && (!c.rpc || !c.mint || !c.creator || (!c.keyFile&&!c.privateKey) || !c.start || !c.dedicatedCreator)) throw new Error('Live mode requires RPC, mint, creator, SIGNER_PRIVATE_KEY or SIGNER_KEY_FILE, START_TIME and DEDICATED_CREATOR_CONFIRMED=true');
   return c;
 }

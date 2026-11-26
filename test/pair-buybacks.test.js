@@ -9,7 +9,7 @@ import { Keypair,PublicKey,VersionedTransaction,TransactionInstruction,SystemPro
 import { TOKEN_PROGRAM_ID,decodeBurnCheckedInstruction,getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { BN } from '@coral-xyz/anchor';
 const mint=Keypair.generate().publicKey.toBase58(),creator=Keypair.generate().publicKey.toBase58(),target=Keypair.generate().publicKey.toBase58();
-function setup(t){const s=new Store(':memory:');t.after(()=>s.close());return new Engine(s,{...config({}),mint,creator,start:10800,minBuyback:'1'});}
+function setup(t){const s=new Store(':memory:');t.after(()=>s.close());return new Engine(s,{...config({}),mint,creator,start:10800,roundSeconds:10800,minBuyback:'1'});}
 const receiptChain=details=>({prepare:async()=>({signature:'sig',wire:'wire',expiry:200,details:{}}),status:async()=>({confirmationStatus:'finalized',err:null}),receipt:async()=>({details})});
 
 test('operator trades never increase pair weight; old pairs qualify and inactive pairs do not',t=>{
@@ -77,4 +77,12 @@ test('large pair allocations are split into capped funding jobs without losing f
  const e=setup(t);e.c.maxBuyback='100';e.addPair({mint:target,quote:mint,creator:'dev',name:'p',symbol:'p',created:10000,signature:'p'});
  e.addTrade({id:'t',mint:target,time:10810,amount:'1',trader:'user',signature:'t'});e.addFee({id:'f',time:10801,amount:'1001',signature:'f'});e.settle(21720);
  const amounts=e.s.all("SELECT amount FROM jobs WHERE kind='pair_funding' ORDER BY id").map(j=>BigInt(j.amount));assert.deepEqual(amounts,[100n,100n,100n,1n]);assert.equal(e.totals().availableRewards,0n);
+});
+test('default paired buyback rounds settle every five minutes after indexing delay',t=>{
+ const e=setup(t);e.c.roundSeconds=config({}).roundSeconds;assert.equal(e.c.roundSeconds,300);
+ e.addPair({mint:target,quote:mint,creator:'dev',name:'p',symbol:'p',created:10000,signature:'p'});
+ for(const time of [10810,11110]){e.addTrade({id:String(time),mint:target,time,amount:'1',trader:'user',signature:String(time)});e.addFee({id:'f'+time,time,amount:'1000',signature:'f'+time});}
+ e.settle(11219);assert.equal(e.s.all('SELECT * FROM rounds').length,0);
+ e.settle(11220);assert.equal(e.s.all('SELECT * FROM rounds').length,1);
+ e.settle(11520);assert.deepEqual(e.s.all('SELECT start,end,pot FROM rounds ORDER BY start').map(r=>[r.start,r.end,r.pot]),[[10800,11100,'300'],[11100,11400,'300']]);
 });

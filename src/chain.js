@@ -27,10 +27,19 @@ export class Chain {
     this.mint=new PublicKey(c.mint);this.creator=c.creator?new PublicKey(c.creator):null;
     // Observer mode never reads a signing key.
     if(c.live) {
-      const data=JSON.parse(readFileSync(c.keyFile,'utf8'));
-      if(!Array.isArray(data)||data.length!==64||data.some(n=>!Number.isInteger(n)||n<0||n>255))throw new Error('Signer must be a 64-byte Solana JSON keypair');
-      this.signer=Keypair.fromSecretKey(Uint8Array.from(data));
+      try {
+        const data=c.privateKey?Array.from(bs58.decode(c.privateKey)):JSON.parse(readFileSync(c.keyFile,'utf8'));
+        if(!Array.isArray(data)||data.length!==64||data.some(n=>!Number.isInteger(n)||n<0||n>255))throw new Error('Invalid key bytes');
+        this.signer=Keypair.fromSecretKey(Uint8Array.from(data));
+      } catch {
+        throw new Error('Invalid signer: use a base58-encoded 64-byte Solana private key, or a readable 64-byte JSON keypair file.');
+      }
       if(!this.signer.publicKey.equals(this.creator))throw new Error('Signer must be the dedicated creator wallet');
+      if(c.nestedPrivateKey){
+        try{const bytes=bs58.decode(c.nestedPrivateKey);if(bytes.length!==64)throw new Error();this.nestedSigner=Keypair.fromSecretKey(bytes);}
+        catch{throw new Error('Invalid nested signer: use a base58-encoded 64-byte Solana private key.');}
+        if(this.nestedSigner.publicKey.toBase58()!==c.nestedFeeWallet)throw new Error('Nested signer must match NESTED_FEE_WALLET');
+      }
     }
   }
   decodeEvents(tx) {
@@ -173,7 +182,31 @@ export class Chain {
     const vaults=await this.pump.getCreatorVaultBalanceBothPrograms(this.creator);
     return BigInt(vaults.toString())+BigInt(state.curve.creatorFee?.toString()||0)+BigInt(state.pool?.creatorFees?.toString()||0);
   }
+  async pendingNestedFees(pair) {
+    if(!await verifyNestedPair(this,pair,this.c.nestedFeeWallet))return 0n;
+    const mint=new PublicKey(pair.mint),parent=new PublicKey(pair.parent_mint);
+    const balances=await this.pump.getCreatorVaultQuoteBalances(feeSharingConfigPda(mint),[parent]);
+    const curve=await this.pump.fetchBondingCurve(mint),poolKey=canonicalPumpPoolPdaWithQuote(mint,parent);
+    const pool=await this.connection.getAccountInfo(poolKey)?await this.amm.fetchPool(poolKey):null;
+    return BigInt(balances.find(b=>b.mint.equals(parent))?.total.toString()||0)+BigInt(curve.creatorFee?.toString()||0)+BigInt(pool?.creatorFees?.toString()||0);
+  }
+  async nestedInstructions(job) {
+    const details=JSON.parse(job.details),user=this.nestedSigner?.publicKey;
+    if(!user||details.wallet!==this.c.nestedFeeWallet||key(user)!==details.wallet)throw new Error('Nested job signer does not match its fee recipient');
+    const mint=new PublicKey(details.mint),state=await this.pairState(mint);
+    if(job.kind==='nested_collect'){
+      const pair={mint:details.sourceMint,parent_mint:details.mint};
+      if(job.recipient!==pair.mint||!await verifyNestedPair(this,pair,details.wallet))throw new Error('Nested fee share is no longer eligible');
+      const built=await this.pump.buildDistributeCreatorFeesInstructions(new PublicKey(pair.mint),{quoteMint:mint,quoteTokenProgram:state.tokenProgram,payer:user});
+      return {instructions:built.instructions,details:{...details,decimals:state.mint.decimals}};
+    }
+    if(job.kind!=='nested_burn'||job.recipient!==details.mint||!details.receiptId||BigInt(job.amount)<=0n)throw new Error('Invalid nested burn obligation');
+    // Burn exactly the authenticated receipt amount, never the wallet's entire balance.
+    const instruction=createBurnCheckedInstruction(getAssociatedTokenAddressSync(mint,user,true,state.tokenProgram),mint,user,BigInt(job.amount),state.mint.decimals,[],state.tokenProgram);
+    return {instructions:[instruction],details:{...details,decimals:state.mint.decimals,burned:job.amount}};
+  }
   async instructions(job) {
+    if(['nested_collect','nested_burn'].includes(job.kind))return this.nestedInstructions(job);
     const user=this.signer.publicKey, amount=new BN(job.amount), details={};
     if(job.kind==='pair_burn')return this.pairBurnInstructions(job);
     if(!['collect','buyback','pair_funding'].includes(job.kind))throw new Error('Unsupported job kind; developer payouts are disabled');
@@ -237,15 +270,17 @@ export class Chain {
   }
   async prepare(job) {
     if(!this.c.live||!this.signer)throw new Error('Execution disabled');
-    const balanceNumber=await this.connection.getBalance(this.signer.publicKey,'finalized');
+    const signer=['nested_collect','nested_burn'].includes(job.kind)?this.nestedSigner:this.signer;
+    if(!signer)throw new Error('Nested signer is not configured');
+    const balanceNumber=await this.connection.getBalance(signer.publicKey,'finalized');
     if(!Number.isSafeInteger(balanceNumber))throw new Error('RPC wallet balance exceeds safe integer range');
     const balance=BigInt(balanceNumber);
-    if(balance<(job.kind==='pair_burn'?0n:BigInt(job.amount))+BigInt(this.c.reserve))throw new Error('Insufficient wallet balance including gas reserve');
+    if(balance<(['pair_burn','nested_burn','nested_collect'].includes(job.kind)?0n:BigInt(job.amount))+BigInt(this.c.reserve))throw new Error('Insufficient wallet balance including gas reserve');
     const built=await this.instructions(job);
     const latest=await this.connection.getLatestBlockhash('finalized');
     const instructions=[ComputeBudgetProgram.setComputeUnitLimit({units:800000}),ComputeBudgetProgram.setComputeUnitPrice({microLamports:this.c.priorityMicroLamports}),...built.instructions];
-    const tx=new VersionedTransaction(new TransactionMessage({payerKey:this.signer.publicKey,recentBlockhash:latest.blockhash,instructions}).compileToV0Message());
-    tx.sign([this.signer]);
+    const tx=new VersionedTransaction(new TransactionMessage({payerKey:signer.publicKey,recentBlockhash:latest.blockhash,instructions}).compileToV0Message());
+    tx.sign([signer]);
     const wire=tx.serialize();if(wire.length>1232)throw new Error('Transaction exceeds Solana packet size');
     const simulation=await this.connection.simulateTransaction(tx,{sigVerify:true,commitment:'finalized'});
     if(simulation.value.err)throw new Error(`Simulation rejected: ${JSON.stringify(simulation.value.err)}`);
@@ -278,10 +313,24 @@ export class Chain {
       if(this.tokenDelta(tx,job.recipient)!==0n)throw new Error('Purchased pair tokens were not fully burned');
       details.quoteSpent=String(spent);details.quoteRefund=String(BigInt(job.amount)-spent);
     }
+    if(job.kind==='nested_burn'){
+      if(details.wallet!==this.c.nestedFeeWallet)throw new Error('Nested receipt wallet differs from configuration');
+      if(-this.tokenDelta(tx,details.mint,details.wallet)!==BigInt(job.amount))throw new Error('Nested burn receipt amount cannot be reconciled');
+      details.burned=job.amount;
+    }
+    if(job.kind==='nested_collect'){
+      let collected=0n;
+      for(const event of this.decodeEvents(tx)){
+        const d=event.data;
+        if(event.name==='distributecreatorfeesevent'&&key(d.mint)===details.sourceMint&&key(d.quoteMint)===details.mint&&key(d.sharingConfig)===key(feeSharingConfigPda(new PublicKey(details.sourceMint)))&&fullFeeShare(d.shareholders,details.wallet))collected+=BigInt(d.distributed.toString());
+      }
+      if(collected<0n||this.tokenDelta(tx,details.mint,details.wallet)!==collected)throw new Error('Nested collection receipt cannot be reconciled');
+      details.collected=String(collected);
+    }
     return {tx,details};
   }
-  tokenDelta(tx,mint) {
-    const sum=rows=>(rows||[]).filter(r=>r.owner===this.c.creator&&r.mint===mint).reduce((n,r)=>n+BigInt(r.uiTokenAmount.amount),0n);
+  tokenDelta(tx,mint,owner=this.c.creator) {
+    const sum=rows=>(rows||[]).filter(r=>r.owner===owner&&r.mint===mint).reduce((n,r)=>n+BigInt(r.uiTokenAmount.amount),0n);
     if(!tx.meta.preTokenBalances||!tx.meta.postTokenBalances)throw new Error('Missing token balances in finalized receipt');
     return sum(tx.meta.postTokenBalances)-sum(tx.meta.preTokenBalances);
   }

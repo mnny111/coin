@@ -44,6 +44,16 @@ export class Engine {
     if(!this.c.nestedFeeWallet||!pair||f.recipient!==this.c.nestedFeeWallet||f.quote!==pair.parent_mint||units(f.amount)===0n)return false;
     return !!this.s.run('INSERT OR IGNORE INTO nested_fee_receipts VALUES (?,?,?,?,?,?,?)',f.id,f.mint,f.recipient,f.quote,String(f.amount),f.signature,f.time).changes;
   }
+  planNestedBurns(watermark) {
+    if(!this.c.nestedFeeWallet)return;
+    this.s.transaction(()=>{
+      for(const f of this.s.all('SELECT * FROM nested_fee_receipts WHERE recipient=? AND time<=?',this.c.nestedFeeWallet,watermark)){
+        const id='nested-burn:'+createHash('sha256').update(f.id).digest('hex');
+        const details={receiptId:f.id,sourceMint:f.mint,mint:f.quote_mint,wallet:f.recipient};
+        this.s.run('INSERT OR IGNORE INTO jobs(id,kind,amount,recipient,details,created,updated) VALUES (?,?,?,?,?,?,?)',id,'nested_burn',f.amount,f.quote_mint,JSON.stringify(details),nowSeconds(),nowSeconds());
+      }
+    });
+  }
   listedPairs(now=nowSeconds()) {
     const direct=this.s.all('SELECT * FROM pairs').map(p=>({...p,depth:1,parent_mint:this.c.mint,parent_symbol:'COIN'}));
     if(!this.c.nestedFeeWallet)return direct;
@@ -73,8 +83,10 @@ export class Engine {
       } else {reservedRewards+=BigInt(job.amount);if(job.status==='confirmed'){const d=JSON.parse(job.details);reservedRewards-=BigInt(d.refund||0);result.pairFunded+=BigInt(d.spent||0);}}
     }
     result.pairBurns=this.s.get("SELECT COUNT(*) AS n FROM jobs WHERE kind='pair_burn' AND status='confirmed'").n;
+    const nestedBurns={};
+    for(const job of this.s.all("SELECT recipient,amount FROM jobs WHERE kind='nested_burn' AND status='confirmed'"))nestedBurns[job.recipient]=String(BigInt(nestedBurns[job.recipient]||0)+BigInt(job.amount));
     const pairQuoteCredits=this.s.all('SELECT * FROM pair_credits');
-    return {...result,pairQuoteCredits,availableBuyback:result.buyback-reservedBuy,availableRewards:result.rewards-reservedRewards};
+    return {...result,nestedBurns,pairQuoteCredits,availableBuyback:result.buyback-reservedBuy,availableRewards:result.rewards-reservedRewards};
   }
   leaderboard(start) {
     const end=start+this.c.roundSeconds;

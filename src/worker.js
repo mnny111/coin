@@ -58,7 +58,7 @@ export async function tick(engine,chain) {
   // Reconcile pending transactions before new planning; pause never abandons in-flight work.
   if(c.live)for(const job of s.all("SELECT * FROM jobs WHERE status='prepared' ORDER BY created,id"))await executeJob(s,chain,job);
   const watermark=await chain.index(engine);
-  engine.settle(watermark);engine.planBuyback();
+  engine.settle(watermark);engine.planBuyback();engine.planNestedBurns(watermark);
   if(!c.live||s.setting('paused')==='true')return;
   const last=Number(s.setting('lastCollect')||0);
   if(nowSeconds()-last>=c.collectSeconds&&!s.get("SELECT id FROM jobs WHERE kind='collect' AND status!='confirmed'")) {
@@ -66,9 +66,23 @@ export async function tick(engine,chain) {
     if(pending>=BigInt(c.minBuyback))engine.job(`collect:${nowSeconds()}`,'collect','0');
     s.setting('lastCollect',nowSeconds());
   }
+  if(chain.nestedSigner){
+    const batch=Math.floor(nowSeconds()/c.collectSeconds);
+    for(const pair of s.all('SELECT n.* FROM nested_pairs n JOIN nested_verification v ON v.mint=n.mint WHERE v.valid=1 AND v.wallet=? AND v.checked>=?',c.nestedFeeWallet,nowSeconds()-300)){
+      if(s.get("SELECT id FROM jobs WHERE kind='nested_collect' AND recipient=? AND status!='confirmed'",pair.mint))continue;
+      if(s.setting('nestedCollectCheck:'+pair.mint)===String(batch))continue;
+      try{
+        if(await chain.pendingNestedFees(pair)>0n){
+          const details=JSON.stringify({sourceMint:pair.mint,mint:pair.parent_mint,wallet:c.nestedFeeWallet});
+          s.run('INSERT OR IGNORE INTO jobs(id,kind,amount,recipient,details,created,updated) VALUES (?,?,?,?,?,?,?)',`nested-collect:${batch}:${pair.mint}`,'nested_collect','0',pair.mint,details,nowSeconds(),nowSeconds());
+        }
+        s.setting('nestedCollectCheck:'+pair.mint,batch);
+      }catch{ s.setting('nestedCollectCheck:'+pair.mint,batch);s.audit('nested-collection-check-failed',{mint:pair.mint}); }
+    }
+  }
   // One prepared transaction at a time keeps wallet accounting and retries simple.
   if(s.get("SELECT id FROM jobs WHERE status='prepared'"))return;
-  const job=s.get("SELECT * FROM jobs WHERE status='planned' ORDER BY CASE kind WHEN 'collect' THEN 0 WHEN 'pair_burn' THEN 1 WHEN 'buyback' THEN 2 ELSE 3 END,created,id LIMIT 1");
+  const job=s.get("SELECT * FROM jobs WHERE status='planned' AND (?=1 OR kind NOT IN ('nested_collect','nested_burn')) ORDER BY CASE kind WHEN 'collect' THEN 0 WHEN 'pair_burn' THEN 1 WHEN 'buyback' THEN 2 ELSE 3 END,created,id LIMIT 1",chain.nestedSigner?1:0);
   if(job) {
     try { await executeJob(s,chain,job); }
     catch(error) {

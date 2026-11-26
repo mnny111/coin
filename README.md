@@ -11,7 +11,7 @@ The frontend is served by the same Node server at `/`, `/buybacks` (legacy `/rew
 - Collects SOL creator fees from the main Coin's Pump and PumpSwap vaults, including sweeping current curve/pool fee buckets.
 - Allocates collected fees: **70% buyback/burn, 30% paired-coin buybacks and burns, no treasury allocation**. Amounts use integers, never floating-point token arithmetic.
 - Buys main Coin on its SOL curve or canonical SOL pool, then burns the exact purchased quantity in the **same atomic transaction**. Slippage and spend caps apply.
-- Every three hours, allocates the 30% pool across all paired coins with nonzero round volume, proportional to their volume. Older pairs qualify; the service wallet’s trades do not count.
+- Every five minutes, allocates the 30% pool across all paired coins with nonzero round volume, proportional to their volume. Older pairs qualify; the service wallet’s trades do not count.
 - Each allocation first buys Coin with SOL. Once finalized, a durable second job buys the paired token and burns the exact purchased quantity atomically. Both steps have separate receipts. No SOL transfers to developers remain.
 - Unspent SOL returns to a later round. Unspent Coin is recorded as a per-pair credit and reused on that pair’s next funding confirmation. Failed or dust-sized purchases retain their reservations and require operator retry; they never count as completed burns.
 - Persists receipts, indexing cursors, rounds, reservations, signed transaction bytes, and execution state in SQLite WAL.
@@ -27,7 +27,7 @@ The user-selected fee split is 70% buyback/burn and 30% paired-coin buybacks and
 | Rule | Default |
 | --- | --- |
 | Treasury | No allocation; rounding remainder goes to paired-coin buybacks and burns |
-| Round boundaries | UTC 00:00–03:00, 03:00–06:00, etc. |
+| Round boundaries | UTC five-minute boundaries: 00:00–00:05, 00:05–00:10, etc. |
 | Pair eligibility | All discovered pairs with nonzero round volume, regardless of launch date |
 | Ranking | Coin quote-token volume across the Pump curve and canonical PumpSwap pool |
 | Pair allocation | Proportional to round volume, using exact integers; deterministic rounding |
@@ -84,11 +84,11 @@ The RPC needs full transaction history from `START_TIME`, version-0 transaction 
 
 Create your own main Coin paired with SOL, using a **dedicated creator wallet**. Pump's creator vaults aggregate fees from every coin using a creator address; the backend cannot attribute a collection to one mint when that wallet is reused. Shared creator-fee configurations, CTO destinations that differ from the configured creator, non-SOL main-coin quotes, and transfer-fee main mints are rejected or unsupported.
 
-Provide a local 64-byte Solana JSON keypair file through a secret mount, not the repository. Fund this wallet separately for transaction fees and token-account rent. Then set:
+Set `SIGNER_PRIVATE_KEY` to the creator wallet’s base58-encoded 64-byte exported Solana private key in the hosting secret variables or ignored local `.env`. This is not the recovery phrase or public address. A `SIGNER_KEY_FILE` JSON keypair remains supported as an alternative; never set both. Fund this wallet separately for transaction fees and token-account rent. Then set:
 
 ```dotenv
 EXECUTION_MODE=live
-SIGNER_KEY_FILE=/run/secrets/coin-creator.json
+SIGNER_PRIVATE_KEY=YOUR_EXPORTED_BASE58_PRIVATE_KEY
 DEDICATED_CREATOR_CONFIRMED=true
 ```
 
@@ -122,15 +122,15 @@ Jobs progress `planned → prepared → confirmed` or `prepared → failed`. `pr
 
 ## Deploy
 
-For Docker, configure `.env` then use `docker compose up --build -d`. Both containers mount the same local named volume. Add a read-only signing-key secret mount to the worker for live mode. Docker installation uses `--ignore-scripts` intentionally.
+For Docker, configure `.env` then use `docker compose up --build -d`. Both containers mount the same local named volume. Provide `SIGNER_PRIVATE_KEY` securely to the worker for live mode, or use a read-only signing-key file mount. Docker installation uses `--ignore-scripts` intentionally.
 
-For Railway or another container host, deploy **one service replica** with a persistent volume mounted at `/app/data`, start command `node src/service.js`, `HOST=0.0.0.0`, and `DATABASE_PATH=/app/data/coin.sqlite`. Set runtime variables from `.env.example` and mount the keypair file securely. Two separate Railway services cannot share a local SQLite volume; use this combined service or migrate storage to Postgres before separating them. No hosting deployment or account changes were made here.
+For Railway or another container host, deploy **one service replica** with a persistent volume mounted at `/app/data`, start command `node src/service.js`, `HOST=0.0.0.0`, and `DATABASE_PATH=/app/data/coin.sqlite`. Set runtime variables from `.env.example` and configure the signer as a secret environment variable or securely mounted file. Two separate Railway services cannot share a local SQLite volume; use this combined service or migrate storage to Postgres before separating them. No hosting deployment or account changes were made here.
 
 Back up the SQLite database with a SQLite-aware backup tool, or stop both processes before copying the database and its WAL files. Do not replace the database on a live worker: its transaction journal is what prevents repeat purchases.
 
 ## Validation and dependency notes
 
-`npm test`: 45 passing tests after the nested listing change. Tests cover integer conservation, ranking and eligibility, rollovers, fee timing, duplicate events, persisted state, transaction timeout/expiry/failure recovery, real HTTP endpoints, SDK event decoding, real Solana transaction construction with mocked RPC simulation, and JSON-RPC transport compatibility. `npm run check` passes.
+`npm test`: Local test suite covers nested listing, signer validation, and fee burns. Tests cover integer conservation, ranking and eligibility, rollovers, fee timing, duplicate events, persisted state, transaction timeout/expiry/failure recovery, real HTTP endpoints, SDK event decoding, real Solana transaction construction with mocked RPC simulation, and JSON-RPC transport compatibility. `npm run check` passes.
 
 These are local/fixture tests. They do not prove that current mainnet conditions, account state, fee collection, or buybacks will succeed with your token. No funded mainnet or local-validator end-to-end run was performed.
 
@@ -150,10 +150,18 @@ Official integration references:
 
 Coins paired with a direct Coin pair are discovered privately. Set `NESTED_FEE_WALLET` to the chosen public receiving address. With no wallet configured, no nested coin is listed. A nested listing requires both a current canonical Pump fee-sharing configuration allocating 100% to that wallet and at least one positive, finalized Pump creator-fee distribution identifying that mint, its parent quote token, and that recipient. Ordinary token transfers and partial shares do not qualify.
 
-The worker validates the sharing account owner, mint, curve creator/quote, and migrated pool creator/quote at finalized commitment. Changed, failed, or more-than-five-minute-old verification hides the nested listing. Funds arrive in the parent token, remain separate from the SOL buyback ledger, and are not automatically spent by this listing integration. Direct-pair listings and buyback eligibility are unchanged; nested tokens are displayed only, not added to direct-pair volume rankings. This gates the website listing, not permissionless Pump launches.
+The worker validates the sharing account owner, mint, curve creator/quote, and migrated pool creator/quote at finalized commitment. Changed, failed, or more-than-five-minute-old verification hides the nested listing. Funds arrive in the parent token, remain separate from the SOL buyback ledger, and are burned directly in full when the nested signer and live mode are enabled. Direct-pair listings and buyback eligibility are unchanged; nested tokens are displayed only, not added to direct-pair volume rankings. This gates the website listing, not permissionless Pump launches.
 
 ## Admin panel
 
 Open `/admin` and enter the server’s `ADMIN_PASSCODE`. The passcode stays in browser memory only; reloading locks the panel. If no passcode is configured, admin APIs remain disabled. Serve production traffic over HTTPS. The panel saves the main mint in SQLite, overriding `COIN_MINT` for both the API and worker after restart. It validates the address format; the worker performs on-chain mint checks before execution.
 
 Mint changes are blocked once an accounting policy is bound, ledger data exists, or a worker holds an active lease. Use a separate database or reviewed migration for a different live token. Saving a mint does not activate trading. RPC, creator address, start time, signer secrets, and live mode remain server-side configuration. Restart the worker after initial setup. Set your own `ADMIN_PASSCODE` in the ignored `.env` and restart the server.
+
+## Nested parent-token burns
+
+Set `NESTED_FEE_WALLET` and its matching base58 `NESTED_SIGNER_PRIVATE_KEY` in server secrets. In live mode, verified 100% fee-sharing coins are checked for collection every `COLLECT_SECONDS` (300 by default). The nested wallet pays SOL gas and rent; fund it separately above the configured gas reserve. The worker never uses the main signer as an implicit fallback.
+
+A finalized authenticated distribution creates one durable burn obligation for its full parent-token amount. Each receipt has a deterministic job ID. Confirmed and failed jobs both prevent duplicate allocation; failures retain their obligation for explicit retry. Burns use SPL BurnChecked and are reported complete only after finalized balance reconciliation. Amounts are never mixed across parent mints or added to the main 70/30 SOL budget. Ordinary transfers/top-ups do not create burn obligations. Observe mode plans burns but does not load either signer or submit transactions. Missing nested credentials leave nested work queued without blocking main buybacks.
+
+Fee-share changes prevent new automatic collection; already-received fees remain burn obligations. Historical verified receipts in this database are included when enabling this feature. If tokens have been withdrawn since receipt, their burn fails rather than reducing the recorded obligation. No funded end-to-end mainnet execution has been performed.
