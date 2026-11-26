@@ -76,7 +76,7 @@ async function main() {
   process.on('SIGINT',()=>{stopped=true;});process.on('SIGTERM',()=>{stopped=true;});
   console.log(`Coin worker: ${c.live?'live':'observe'} mode`);
   try {
-    await chain.mainState();
+    const initialState=await chain.mainState();s.setting('coinDecimals',initialState.mint.decimals);
     while(!stopped) {
       try { await tick(engine,chain);s.setting('workerError',''); }
       catch(error) {s.setting('workerError',String(error.message).slice(0,500));console.error('Worker cycle failed; see local operator status.');}

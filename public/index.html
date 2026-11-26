@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Coin — One coin. An endless flywheel.</title>
+  <meta name="description" content="An ecosystem built around Coin. Explore paired coins, developer rewards, and public buyback and burn transactions.">
+  <link rel="icon" href="/coin-logo.png" type="image/png"><link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="header"><div class="header-inner">
+    <a class="wordmark" href="/" aria-label="Coin home"><img src="/coin-logo.png" alt="Coin" width="48" height="48"></a>
+    <nav aria-label="Main navigation"><a href="/" data-nav="/">Ecosystem</a><a href="/rewards" data-nav="/rewards">Rewards</a><a href="/activity" data-nav="/activity">Activity</a><a href="/about" data-nav="/about">How it works</a></nav>
+    <button class="button primary header-launch" data-launch>Launch a coin <span aria-hidden="true">+</span></button>
+  </div></header>
+  <main id="main" tabindex="-1"></main>
+  <footer class="footer"><a class="wordmark" href="/" aria-label="Coin home"><img src="/coin-logo.png" alt="Coin" width="36" height="36"></a><p>One coin, powered by its community.</p><div><a href="/about">How it works</a><a href="/activity">On-chain activity</a><span id="sync-status">Connecting…</span></div></footer>
+  <dialog id="launch-dialog" aria-labelledby="launch-title"><button class="dialog-close" aria-label="Close launch instructions">×</button><p class="eyebrow">JOIN THE FAMILY</p><h2 id="launch-title">Your idea. Paired with Coin.</h2><p class="muted">Launch on Pump.fun as usual. Choose Coin as your pairing token to join the ecosystem.</p><ol class="launch-steps"><li><span>1</span><div><strong>Create your coin</strong><p>Add your name, ticker, and image on Pump.fun.</p></div></li><li><span>2</span><div><strong>Pair it with Coin</strong><p>Select Coin instead of SOL as the quote token.</p></div></li><li><span>3</span><div><strong>Become part of the family</strong><p>Your paired coin is picked up automatically. No registration here.</p></div></li></ol><div id="launch-address"></div><a class="button primary wide" href="https://pump.fun/create" target="_blank" rel="noopener noreferrer">Continue to Pump.fun</a><p class="dialog-note">Launching and signing happen on Pump.fun.</p></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body></html>

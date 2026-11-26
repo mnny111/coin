@@ -23,13 +23,13 @@ function trade(e,name,amount,time=10810,id=`trade-${name}`){e.addTrade({id,mint:
 function fee(e,amount='1000',time=10820,id='fee'){e.addFee({id,amount,time,signature:id});}
 
 test('exact integer fee allocation conserves arbitrary large amounts and dust',()=>{
-  for(const amount of ['0','1','9','101','9007199254740993123456789']){const s=splitFees(amount);assert.equal(s.buyback+s.rewards+s.treasury,BigInt(amount));}
-  assert.deepEqual(splitFees('1000'),{buyback:600n,rewards:200n,treasury:200n});
+  for(const amount of ['0','1','9','101','9007199254740993123456789']){const s=splitFees(amount);assert.equal(s.buyback+s.rewards+s.treasury,BigInt(amount));assert.equal(s.treasury,0n);}
+  assert.deepEqual(splitFees('1000'),{buyback:700n,rewards:300n,treasury:0n});
   assert.throws(()=>splitFees('-1'));assert.throws(()=>splitFees('1.2'));assert.throws(()=>splitFees('10',8000,3000));
   assert.deepEqual(proportional('11',[50,30,20]),[6n,3n,2n]);
 });
 test('unconfigured API database can be configured later',t=>{const e=setup(t,config({}));assert.equal(e.s.setting('policy'),null);new Engine(e.s,settings());assert.ok(e.s.setting('policy'));});
-test('policy changes cannot silently reinterpret historical money',t=>{const e=setup(t);assert.throws(()=>new Engine(e.s,{...e.c,buybackBps:7000}),/policy changed/);});
+test('policy changes cannot silently reinterpret historical money',t=>{const e=setup(t);assert.throws(()=>new Engine(e.s,{...e.c,buybackBps:6000}),/policy changed/);});
 test('deduplicates receipts and trades and rejects unrelated quote mints',t=>{
   const e=setup(t);pair(e,'a');trade(e,'a','90071992547409931234');trade(e,'a','90071992547409931234');fee(e);fee(e);
   assert.equal(e.totals().collected,1000n);assert.equal(e.leaderboard(10800)[0].volume,90071992547409931234n);
@@ -40,17 +40,17 @@ test('rounds pay top three new pairs only, preserve exact pot, and settle once',
   ['a','b','c','d'].forEach((n,i)=>{pair(e,n);trade(e,n,String(400-i*100));});
   fee(e);e.settle(21720);e.settle(21720);
   const jobs=e.s.all("SELECT * FROM jobs WHERE kind='reward' ORDER BY id");
-  assert.equal(jobs.length,3);assert.deepEqual(jobs.map(j=>j.amount),['100','60','40']);
+  assert.equal(jobs.length,3);assert.deepEqual(jobs.map(j=>j.amount),['150','90','60']);
   assert.deepEqual(jobs.map(j=>j.recipient),['dev-a','dev-b','dev-c']);assert.equal(e.totals().availableRewards,0n);
 });
 test('no eligible pairs rolls pot forward; one winner gets the full pot',t=>{
   const e=setup(t);fee(e);e.settle(21720);assert.equal(e.s.get('SELECT pot FROM rounds').pot,'0');
   pair(e,'a',21601);trade(e,'a','1',21605);e.settle(32520);
-  assert.equal(e.s.get("SELECT amount FROM jobs WHERE kind='reward'").amount,'200');
+  assert.equal(e.s.get("SELECT amount FROM jobs WHERE kind='reward'").amount,'300');
 });
 test('fees from a later round cannot be spent by an earlier round',t=>{
   const e=setup(t);pair(e,'a');trade(e,'a','1');fee(e,'1000',21601);e.settle(21720);
-  assert.equal(e.s.all('SELECT * FROM jobs').length,0);assert.equal(e.totals().availableRewards,200n);
+  assert.equal(e.s.all('SELECT * FROM jobs').length,0);assert.equal(e.totals().availableRewards,300n);
 });
 test('round boundary excludes launches and trades at its exact end',t=>{
   const e=setup(t);pair(e,'a');trade(e,'a','1',21600);pair(e,'b',21600);trade(e,'b','100',21600);fee(e);e.settle(21720);
@@ -157,4 +157,19 @@ test('patched JSON-RPC transport works against a real HTTP fixture',async t=>{
   await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
   const connection=new Connection(`http://127.0.0.1:${server.address().port}`);
   assert.equal(await connection.getBalance(new PublicKey(mint)),456);
+});
+
+test('frontend clean routes serve HTML, assets have correct types, and private files stay inaccessible',async t=>{
+  const e=setup(t),server=createApi(e);await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
+  const root=`http://127.0.0.1:${server.address().port}`;
+  for(const route of ['/','/rewards','/activity','/about']){const r=await fetch(root+route);assert.equal(r.status,200);assert.match(r.headers.get('content-type'),/text\/html/);assert.match(await r.text(),/id="main"/);assert.match(r.headers.get('content-security-policy'),/frame-ancestors 'none'/);}
+  assert.match((await fetch(root+'/app.js')).headers.get('content-type'),/javascript/);
+  assert.match((await fetch(root+'/styles.css')).headers.get('content-type'),/text\/css/);
+  for(const route of ['/.env','/src/config.js','/data/coin.sqlite','/package.json'])assert.equal((await fetch(root+route)).status,404);
+});
+test('pair search matches names and treats SQL wildcard input literally',async t=>{
+  const e=setup(t);pair(e,'Alpha');pair(e,'Percent%');pair(e,'Under_score');
+  const server=createApi(e);await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
+  const root=`http://127.0.0.1:${server.address().port}`;
+  for(const [query,name] of [['alpha','Alpha'],['%','Percent%'],['_','Under_score']]){const result=await (await fetch(root+'/api/pairs?q='+encodeURIComponent(query))).json();assert.equal(result.total,1);assert.equal(result.items[0].name,name);}
 });

@@ -1,13 +1,15 @@
-# Coin backend
+# Coin
 
-An independent implementation of the Coin concept supplied in the conversation. No pairedcoin.family scraping or copied private backend. This deliverable is the backend; frontend design can be added later.
+An independent implementation of the Coin concept supplied in the conversation. No pairedcoin.family scraping or copied private backend. Includes a simple white frontend with ecosystem search, developer rewards, transaction activity, launch instructions, and FAQs.
+
+The frontend is served by the same Node server at `/`, `/rewards`, `/activity`, and `/about`. It reads the real backend APIs, refreshes every 30 seconds while visible, and leaves unconfigured values unavailable. It contains no seeded coins or invented transactions. Launching continues on Pump.fun; this site does not request wallet connections. Desktop and 390px mobile layouts, navigation, search empty state, launch dialog and FAQ were checked in the browser with no console errors.
 
 ## Implemented behavior
 
 - Discovers Pump launches quoted in your `COIN_MINT`, without developer registration or a website wallet connection.
 - Indexes finalized Pump bonding-curve and canonical PumpSwap trades. Rankings use raw Coin quote-token volume, with buys and sells counted once per event.
 - Collects SOL creator fees from the main Coin's Pump and PumpSwap vaults, including sweeping current curve/pool fee buckets.
-- Allocates collected fees: **60% buyback/burn, 20% developer rewards, 20% retained treasury**. Amounts use integers, never floating-point token arithmetic.
+- Allocates collected fees: **70% buyback/burn, 30% developer rewards, no treasury allocation**. Amounts use integers, never floating-point token arithmetic.
 - Buys main Coin on its SOL curve or canonical SOL pool, then burns the exact purchased quantity in the **same atomic transaction**. Slippage and spend caps apply.
 - Every three hours, freezes the top three eligible new pairs and queues SOL payments to their original on-chain creator addresses.
 - Persists receipts, indexing cursors, rounds, reservations, signed transaction bytes, and payout state in SQLite WAL.
@@ -18,11 +20,11 @@ The SOL → Coin → paired-token trading route belongs to Pump's launch/trading
 
 ## Explicit assumptions
 
-The original post specifies 60% buyback/burn and 20% developer rewards but leaves the following rules undefined. These are this implementation's defaults, not claims about the reference service:
+The user-selected fee split is 70% buyback/burn and 30% developer rewards. The remaining rules below are implementation defaults, not claims about the reference service:
 
 | Rule | Default |
 | --- | --- |
-| Remaining fees | 20% retained in treasury; no automatic treasury withdrawal |
+| Treasury | No allocation; rounding remainder goes to developer rewards |
 | Round boundaries | UTC 00:00–03:00, 03:00–06:00, etc. |
 | New pair eligibility | Launched inside that round, with nonzero trading volume inside it |
 | Ranking | Coin quote-token volume across the Pump curve and canonical PumpSwap pool |
@@ -88,7 +90,7 @@ SIGNER_KEY_FILE=/run/secrets/coin-creator.json
 DEDICATED_CREATOR_CONFIRMED=true
 ```
 
-The signer must match `CREATOR_ADDRESS`. Defaults reserve 0.05 SOL for gas, collect at five-minute intervals when at least 0.01 SOL is available, and cap each buyback at 0.1 SOL. Buyback quotes allow 1% slippage inside that budget. The retained 20% can absorb operating costs, but `treasury` in the API is cumulative allocation, not a reconciled spendable wallet balance. Donations/top-ups are not automatically treated as creator fees or reward-pot deposits.
+The signer must match `CREATOR_ADDRESS`. Defaults reserve 0.05 SOL for gas, collect at five-minute intervals when at least 0.01 SOL is available, and cap each buyback at 0.1 SOL. Buyback quotes allow 1% slippage inside that budget. Network fees and operating costs require separate funding. The `treasury` API field remains for compatibility and is zero under the 70/30 policy. Donations/top-ups are not automatically treated as creator fees or reward-pot deposits.
 
 No mainnet transaction has been submitted or verified end to end for this deliverable. Before running live, perform funded validation with your own token and small limits: collection, atomic buy-and-burn, and a developer payment. Never use the reference project's mint or wallets as your deployment settings.
 
@@ -124,7 +126,7 @@ Back up the SQLite database with a SQLite-aware backup tool, or stop both proces
 
 ## Validation and dependency notes
 
-`npm test`: 27 passing tests at delivery. Tests cover integer conservation, ranking and eligibility, rollovers, fee timing, duplicate events, persisted state, transaction timeout/expiry/failure recovery, real HTTP endpoints, SDK event decoding, real Solana transaction construction with mocked RPC simulation, and JSON-RPC transport compatibility. `npm run check` passes.
+`npm test`: 29 passing tests at delivery. Tests cover integer conservation, ranking and eligibility, rollovers, fee timing, duplicate events, persisted state, transaction timeout/expiry/failure recovery, real HTTP endpoints, SDK event decoding, real Solana transaction construction with mocked RPC simulation, and JSON-RPC transport compatibility. `npm run check` passes.
 
 These are local/fixture tests. They do not prove that current mainnet conditions, account state, fee collection, or buybacks will succeed with your token. No funded mainnet or local-validator end-to-end run was performed.
 

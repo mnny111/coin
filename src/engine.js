@@ -6,11 +6,11 @@ export function units(value) {
   if (!/^(0|[1-9][0-9]*)$/.test(s)) throw new Error('Invalid unsigned integer');
   return BigInt(s);
 }
-export function splitFees(amount, buybackBps = 6000, rewardsBps = 2000) {
+export function splitFees(amount, buybackBps = 7000, rewardsBps = 3000) {
   const a = units(amount);
   if (![buybackBps,rewardsBps].every(n => Number.isInteger(n) && n >= 0) || buybackBps + rewardsBps > 10000) throw new Error('Invalid allocation');
   const buyback = a * BigInt(buybackBps) / 10000n;
-  const rewards = a * BigInt(rewardsBps) / 10000n;
+  const rewards = buybackBps + rewardsBps === 10000 ? a - buyback : a * BigInt(rewardsBps) / 10000n;
   return { buyback, rewards, treasury: a-buyback-rewards };
 }
 export function proportional(amount, weights) {

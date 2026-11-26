@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { config } from './config.js';
 import { Store } from './store.js';
@@ -23,13 +24,26 @@ export function createApi(engine) {
     const send=(status,data)=>{res.writeHead(status);res.end(json(data));};
     try {
       const url=new URL(req.url,'http://localhost'),path=url.pathname;
+      const pages=['/','/rewards','/activity','/about'];
+      const assets={'/app.js':['app.js','text/javascript'],'/styles.css':['styles.css','text/css'],'/favicon.svg':['favicon.svg','image/svg+xml'],'/coin-logo.png':['coin-logo.png','image/png'],'/poppins-bold.ttf':['poppins-bold.ttf','font/ttf']};
+      if(req.method==='GET'&&(pages.includes(path)||assets[path])) {
+        const [file,type]=assets[path]||['index.html','text/html'];
+        const content=await readFile(new URL(`../public/${file}`,import.meta.url));
+        res.setHeader('Content-Type',`${type}; charset=utf-8`);
+        res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+        res.writeHead(200);res.end(content);return;
+      }
       const limit=Math.min(200,Math.max(1,Number(url.searchParams.get('limit'))||50));
       const offset=Math.max(0,Number(url.searchParams.get('offset'))||0);
       if(!Number.isInteger(limit)||!Number.isSafeInteger(offset))return send(400,{error:'Invalid pagination'});
       if(req.method==='GET'&&path==='/health')return send(200,{ok:true,name:'Coin',configured:!!(c.mint&&c.creator&&c.rpc&&c.start),execution:c.live?'live':'observe',indexedAt:Number(s.setting('indexedAt'))||null,workerHealthy:nowSeconds()-Number(s.setting('workerHeartbeat')||0)<Math.max(120,c.interval*3)&&!s.setting('workerError')});
-      if(req.method==='GET'&&path==='/api/config')return send(200,{name:c.name,mint:c.mint,creator:c.creator,execution:c.live?'live':'observe',roundSeconds:c.roundSeconds,buybackBps:c.buybackBps,rewardsBps:c.rewardsBps,treasuryBps:10000-c.buybackBps-c.rewardsBps,winnerWeights:c.winnerWeights,ranking:'quote-token trading volume; coins launched within the round',launchUrl:'https://pump.fun/create',requiresWalletConnection:false});
+      if(req.method==='GET'&&path==='/api/config')return send(200,{name:c.name,mint:c.mint,decimals:s.setting('coinDecimals')===null?null:Number(s.setting('coinDecimals')),creator:c.creator,execution:c.live?'live':'observe',roundSeconds:c.roundSeconds,buybackBps:c.buybackBps,rewardsBps:c.rewardsBps,treasuryBps:10000-c.buybackBps-c.rewardsBps,winnerWeights:c.winnerWeights,ranking:'quote-token trading volume; coins launched within the round',launchUrl:'https://pump.fun/create',requiresWalletConnection:false});
       if(req.method==='GET'&&path==='/api/stats')return send(200,{...engine.totals(),pairs:s.get('SELECT COUNT(*) AS n FROM pairs').n,watermark:Number(s.setting('watermark'))||null});
-      if(req.method==='GET'&&path==='/api/pairs')return send(200,{items:s.all('SELECT * FROM pairs ORDER BY created DESC,mint LIMIT ? OFFSET ?',limit,offset),limit,offset});
+      if(req.method==='GET'&&path==='/api/pairs') {
+        const q=(url.searchParams.get('q')||'').slice(0,100).replace(/[\\%_]/g,'\\$&'),pattern=`%${q}%`;
+        const where="WHERE name LIKE ? ESCAPE '\\' OR symbol LIKE ? ESCAPE '\\' OR mint LIKE ? ESCAPE '\\'";
+        return send(200,{items:s.all(`SELECT * FROM pairs ${where} ORDER BY created DESC,mint LIMIT ? OFFSET ?`,pattern,pattern,pattern,limit,offset),total:s.get(`SELECT COUNT(*) AS n FROM pairs ${where}`,pattern,pattern,pattern).n,limit,offset});
+      }
       if(req.method==='GET'&&path==='/api/rounds/current') {
         const start=Math.floor(nowSeconds()/c.roundSeconds)*c.roundSeconds;
         return send(200,{start,end:start+c.roundSeconds,pot:engine.totals().availableRewards,leaderboard:engine.leaderboard(start),indexedThrough:Number(s.setting('watermark'))||null});
