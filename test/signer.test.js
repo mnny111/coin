@@ -21,3 +21,11 @@ test('nested signer credentials stay unused in observation mode and invalid valu
  assert.throws(()=>new Chain({...c,live:true}),error=>error.message.startsWith('Invalid nested signer:')&&!error.message.includes('invalid-secret'));
  assert.throws(()=>settings({NESTED_SIGNER_PRIVATE_KEY:'invalid-secret'}),/requires NESTED_FEE_WALLET/);
 });
+
+test('invalid public addresses identify the field without exposing its value',()=>{
+ for(const field of ['COIN_MINT','CREATOR_ADDRESS','NESTED_FEE_WALLET']){
+  assert.throws(()=>config({[field]:'invalid-sensitive-value'}),error=>error.message.includes(field)&&!error.message.includes('invalid-sensitive-value'));
+ }
+ const address=Keypair.generate().publicKey.toBase58();
+ assert.equal(config({NESTED_FEE_WALLET:'  '+address+'  '}).nestedFeeWallet,address);
+});

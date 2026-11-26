@@ -13,7 +13,12 @@ export function config(env = process.env, savedMint) {
     if (!/^[0-9]+$/.test(value)) throw new Error(`Invalid ${key}; use integer lamports`);
     return value;
   };
-  const address = key => env[key] ? new PublicKey(env[key]).toBase58() : null;
+  const address = key => {
+    const value = env[key]?.trim();
+    if (!value) return null;
+    try { return new PublicKey(value).toBase58(); }
+    catch { throw new Error('Invalid ' + key + ': use a Solana public address, not a private key, with no surrounding quotes.'); }
+  };
   const c = {
     name: 'Coin', db: resolve(env.DATABASE_PATH || 'data/coin.sqlite'),
     port: integer('PORT', 3000, 1, 65535), host: env.HOST || '127.0.0.1',
