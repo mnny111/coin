@@ -1,3 +1,5 @@
+import { PublicKey } from '@solana/web3.js';
+import { resolve } from 'node:path';
 import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -19,15 +21,16 @@ async function body(req) {
 }
 export function createApi(engine) {
   const s=engine.s,c=engine.c;
+  const attempts=new Map();
   return createServer(async(req,res)=>{
     res.setHeader('Content-Type','application/json; charset=utf-8');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');
     const send=(status,data)=>{res.writeHead(status);res.end(json(data));};
     try {
       const url=new URL(req.url,'http://localhost'),path=url.pathname;
-      const pages=['/','/buybacks','/rewards','/activity','/about'];
-      const assets={'/app.js':['app.js','text/javascript'],'/styles.css':['styles.css','text/css'],'/favicon.svg':['favicon.svg','image/svg+xml'],'/coin-logo.png':['coin-logo.png','image/png'],'/poppins-bold.ttf':['poppins-bold.ttf','font/ttf']};
+      const pages=['/admin','/','/buybacks','/rewards','/activity','/about'];
+      const assets={'/admin.js':['admin.js','text/javascript'],'/admin.css':['admin.css','text/css'],'/app.js':['app.js','text/javascript'],'/styles.css':['styles.css','text/css'],'/favicon.svg':['favicon.svg','image/svg+xml'],'/coin-logo.png':['coin-logo.png','image/png'],'/poppins-bold.ttf':['poppins-bold.ttf','font/ttf']};
       if(req.method==='GET'&&(pages.includes(path)||assets[path])) {
-        const [file,type]=assets[path]||['index.html','text/html'];
+        const [file,type]=assets[path]||[path==='/admin'?'admin.html':'index.html','text/html'];
         const content=await readFile(new URL(`../public/${file}`,import.meta.url));
         res.setHeader('Content-Type',`${type}; charset=utf-8`);
         res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
@@ -52,7 +55,29 @@ export function createApi(engine) {
       if(req.method==='GET'&&path==='/api/transactions')return send(200,{items:engine.publicJobs(limit,offset)});
       if(req.method==='GET'&&path==='/api/fees')return send(200,{items:s.all('SELECT * FROM fees ORDER BY time DESC,id LIMIT ? OFFSET ?',limit,offset).map(f=>({...f,explorer:`https://solscan.io/tx/${f.signature}`}))});
       if(path.startsWith('/admin/')) {
-        if(!authorized(req,c.adminToken))return send(401,{error:'Unauthorized'});
+        const ip=req.socket.remoteAddress||'unknown',now=Date.now();
+        let attempt=attempts.get(ip);
+        if(attempt&&now-attempt.since>=60000){attempts.delete(ip);attempt=null;}
+        if(attempt?.count>=10){res.setHeader('Retry-After',String(Math.ceil((60000-(now-attempt.since))/1000)));return send(429,{error:'Too many incorrect passcodes. Try again in a minute.'});}
+        if(!authorized(req,c.adminPasscode)){
+          if(!attempt){if(attempts.size>=1000)attempts.delete(attempts.keys().next().value);attempt={count:0,since:now};attempts.set(ip,attempt);}
+          attempt.count++;return send(401,{error:'Unauthorized'});
+        }
+        attempts.delete(ip);
+        if(req.method==='GET'&&path==='/admin/config')return send(200,{mint:c.mint,locked:!!s.setting('policy')||!!s.get('SELECT id FROM lease WHERE expires>?',nowSeconds()),rpcConfigured:!!c.rpc,creatorConfigured:!!c.creator,startConfigured:!!c.start,execution:c.live?'live':'observe',nestedFeeWallet:c.nestedFeeWallet});
+        if(req.method==='POST'&&path==='/admin/config'){
+          const input=await body(req);
+          if(Object.keys(input).some(k=>k!=='mint')||typeof input.mint!=='string'||!input.mint.trim())return send(400,{error:'Enter a Coin mint address.'});
+          let mint;try{mint=new PublicKey(input.mint.trim()).toBase58();}catch{return send(400,{error:'Enter a valid Solana mint address.'});}
+          const result=s.transaction(()=>{
+            if(mint===c.mint)return {unchanged:true};
+            if(s.setting('policy')||s.get('SELECT id FROM lease WHERE expires>?',nowSeconds())||['pairs','nested_pairs','fees','trades','rounds','jobs'].some(table=>s.get(`SELECT 1 AS found FROM ${table} LIMIT 1`)))return {locked:true};
+            s.setting('configuredMint',mint);s.audit('configure-mint',{previous:c.mint,mint});return {saved:true};
+          });
+          if(result.locked)return send(409,{error:'This ledger is already in use. Changing its mint requires a separate database or a reviewed migration.'});
+          c.mint=mint;
+          return send(200,{mint,saved:!!result.saved,message:'Coin mint saved. Restart the worker to use the new configuration.'});
+        }
         if(req.method==='GET'&&path==='/admin/status')return send(200,{paused:s.setting('paused')==='true',workerError:s.setting('workerError'),heartbeat:s.setting('workerHeartbeat'),jobs:s.all('SELECT id,status,error FROM jobs WHERE status!=\'confirmed\' LIMIT 100')});
         if(req.method==='POST'&&path==='/admin/pause') {
           const b=await body(req);if(typeof b.paused!=='boolean')return send(400,{error:'paused must be boolean'});
@@ -73,7 +98,7 @@ export function createApi(engine) {
   });
 }
 function main() {
-  const c=config(),s=new Store(c.db),engine=new Engine(s,c),server=createApi(engine);
+  const s=new Store(resolve(process.env.DATABASE_PATH||'data/coin.sqlite')),c=config(process.env,s.setting('configuredMint')),engine=new Engine(s,c),server=createApi(engine);
   server.requestTimeout=15000;server.headersTimeout=10000;
   server.listen(c.port,c.host,()=>console.log(`Coin API listening on http://${c.host}:${c.port}`));
   const shutdown=()=>server.close(()=>{s.close();process.exit(0);});process.on('SIGTERM',shutdown);process.on('SIGINT',shutdown);

@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { config } from './config.js';
@@ -79,9 +80,9 @@ export async function tick(engine,chain) {
 }
 
 async function main() {
-  const c=config();
+  const s=new Store(resolve(process.env.DATABASE_PATH||'data/coin.sqlite')),c=config(process.env,s.setting('configuredMint'));
   if(!c.rpc||!c.mint||!c.creator||!c.start)throw new Error('Worker requires SOLANA_RPC_URL, COIN_MINT, CREATOR_ADDRESS, START_TIME');
-  const s=new Store(c.db),engine=new Engine(s,c),chain=new Chain(c),owner=randomUUID();
+  const engine=new Engine(s,c),chain=new Chain(c),owner=randomUUID();
   if(!s.acquire(owner,nowSeconds()))throw new Error('Another worker owns this database');
   let stopped=false;
   // Fail-stop on a lost lease, including while a long RPC scan is in flight.

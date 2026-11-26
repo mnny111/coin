@@ -116,7 +116,7 @@ All money/token amounts are decimal **strings in base units**. SOL amounts are l
 | POST | `/admin/pause` | `{"paused":true}` stops new executions; indexing and in-flight reconciliation continue |
 | POST | `/admin/retry` | `{"id":"pair:..."}` retries reserved failed jobs (preparation or finalized execution failures) |
 
-Admin requests require `Authorization: Bearer <ADMIN_TOKEN>` with an operator-supplied token of at least 32 characters. Without a token, all admin requests are denied. Use TLS and a reverse proxy with rate limiting if exposing the API outside localhost. No browser cross-origin permission is enabled by default; serve the later frontend behind the same origin.
+Admin requests require `Authorization: Bearer <ADMIN_PASSCODE>` with your configured passcode. Without a passcode, all admin requests are denied. Use TLS and a reverse proxy with rate limiting if exposing the API outside localhost. No browser cross-origin permission is enabled by default; serve the later frontend behind the same origin.
 
 Jobs progress `planned → prepared → confirmed` or `prepared → failed`. `prepared` means signed and possibly broadcast, not success. Known finalized failures retain their allocation and require explicit retry. Preparation errors become failed with their allocation reserved, so one unsupported or illiquid pair cannot block the rest; use the retry endpoint after resolving the cause. Expired signatures are rebuilt only after finalized expiry and a second signature-history check. The transaction audit retains replaced signatures.
 
@@ -151,3 +151,9 @@ Official integration references:
 Coins paired with a direct Coin pair are discovered privately. Set `NESTED_FEE_WALLET` to the chosen public receiving address. With no wallet configured, no nested coin is listed. A nested listing requires both a current canonical Pump fee-sharing configuration allocating 100% to that wallet and at least one positive, finalized Pump creator-fee distribution identifying that mint, its parent quote token, and that recipient. Ordinary token transfers and partial shares do not qualify.
 
 The worker validates the sharing account owner, mint, curve creator/quote, and migrated pool creator/quote at finalized commitment. Changed, failed, or more-than-five-minute-old verification hides the nested listing. Funds arrive in the parent token, remain separate from the SOL buyback ledger, and are not automatically spent by this listing integration. Direct-pair listings and buyback eligibility are unchanged; nested tokens are displayed only, not added to direct-pair volume rankings. This gates the website listing, not permissionless Pump launches.
+
+## Admin panel
+
+Open `/admin` and enter the server’s `ADMIN_PASSCODE`. The passcode stays in browser memory only; reloading locks the panel. If no passcode is configured, admin APIs remain disabled. Serve production traffic over HTTPS. The panel saves the main mint in SQLite, overriding `COIN_MINT` for both the API and worker after restart. It validates the address format; the worker performs on-chain mint checks before execution.
+
+Mint changes are blocked once an accounting policy is bound, ledger data exists, or a worker holds an active lease. Use a separate database or reviewed migration for a different live token. Saving a mint does not activate trading. RPC, creator address, start time, signer secrets, and live mode remain server-side configuration. Restart the worker after initial setup. Set your own `ADMIN_PASSCODE` in the ignored `.env` and restart the server.

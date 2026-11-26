@@ -126,13 +126,13 @@ test('RPC history gaps do not advance scan cursor',async t=>{
   await assert.rejects(chain.scan(mint,e),/history unavailable/);assert.equal(e.s.setting(`cursor:${mint}`),null);
 });
 test('public API serializes bigints, hides secrets and protects admin actions',async t=>{
-  const e=setup(t,{...settings(),adminToken:'x'.repeat(40)});fee(e);const server=createApi(e);await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
+  const e=setup(t,{...settings(),adminPasscode:'x'.repeat(40)});fee(e);const server=createApi(e);await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
   const root=`http://127.0.0.1:${server.address().port}`;
   assert.equal((await (await fetch(root+'/api/stats')).json()).collected,'1000');
   assert.equal((await fetch(root+'/admin/status')).status,401);
   assert.equal((await fetch(root+'/admin/pause',{method:'POST',headers:{Authorization:`Bearer ${'x'.repeat(40)}`},body:JSON.stringify({paused:true})})).status,200);
   assert.equal(e.s.setting('paused'),'true');assert.equal((await fetch(root+'/api/pairs?offset=-0.5')).status,200);
-  const cfg=await (await fetch(root+'/api/config')).json();assert.equal(cfg.adminToken,undefined);assert.equal(cfg.rpc,undefined);
+  const cfg=await (await fetch(root+'/api/config')).json();assert.equal(cfg.adminPasscode,undefined);assert.equal(cfg.rpc,undefined);
   assert.equal((await fetch(root+'/api/pairs?offset=1.5')).status,400);
 });
 test('live execution requires explicit configuration and dedicated creator',()=>{assert.throws(()=>config({EXECUTION_MODE:'live'}),/Live mode requires/);assert.throws(()=>config({SLIPPAGE_BPS:'1001'}),/Invalid/);});
