@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs';
-import { Connection, PublicKey, Keypair, TransactionMessage, VersionedTransaction, SystemProgram, ComputeBudgetProgram } from '@solana/web3.js';
+import { Connection, PublicKey, Keypair, TransactionMessage, VersionedTransaction, ComputeBudgetProgram } from '@solana/web3.js';
 import { NATIVE_MINT, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, getMint, getAssociatedTokenAddressSync, createBurnCheckedInstruction, getTransferFeeConfig } from '@solana/spl-token';
 import { EventParser, BN } from '@coral-xyz/anchor';
-import { PUMP_SDK, OnlinePumpSdk, getPumpProgram, getPumpAmmProgram, PUMP_PROGRAM_ID, PUMP_AMM_PROGRAM_ID, bondingCurvePda, canonicalPumpPoolPdaWithQuote, getBuyTokenAmountFromSolAmount } from '@pump-fun/pump-sdk';
+import { PUMP_SDK, OnlinePumpSdk, getPumpProgram, getPumpAmmProgram, PUMP_PROGRAM_ID, PUMP_AMM_PROGRAM_ID, bondingCurvePda, canonicalPumpPoolPdaWithQuote, feeSharingConfigPda, getBuyTokenAmountFromSolAmount } from '@pump-fun/pump-sdk';
 import { OnlinePumpAmmSdk, PUMP_AMM_SDK, buyQuoteInput } from '@pump-fun/pump-swap-sdk';
+import { verifyNestedPair, fullFeeShare } from './nested-listing.js';
 import bs58 from 'bs58';
 
 const key = value => value?.toBase58?.() ?? String(value);
@@ -12,6 +13,7 @@ const normalize = value => value.replaceAll('_','').toLowerCase();
 const decoders = {
   createevent: 'decodeCreateEventBc', tradeevent: 'decodeTradeEventBc',
   collectcreatorfeeevent:'decodeCollectCreatorFeeEventBc',
+  distributecreatorfeesevent:'decodeDistributeCreatorFeesEvent',
   createpoolevent:'decodeCreatePoolEventAmm', buyevent:'decodeBuyEventAmm', sellevent:'decodeSellEventAmm',
   collectcoincreatorfeeevent:'decodeCollectCoinCreatorFeeEventAmm',
 };
@@ -86,6 +88,9 @@ export class Chain {
           const p=s.get('SELECT mint FROM pairs WHERE pool=?',key(d.pool));
           if(p)engine.addTrade({id,mint:p.mint,time,amount:(d.quoteAmountIn??d.quoteAmountOut).toString(),trader:key(d.user),signature});
         }
+        if(event.name==='distributecreatorfeesevent'&&fullFeeShare(d.shareholders,this.c.nestedFeeWallet)&&key(d.sharingConfig)===key(feeSharingConfigPda(d.mint))) {
+          engine.recordNestedFee({id,mint:key(d.mint),recipient:this.c.nestedFeeWallet,quote:key(d.quoteMint),amount:d.distributed.toString(),signature,time});
+        }
         // Creator vaults aggregate all launches for that creator. A dedicated wallet is mandatory.
         if(event.name==='collectcreatorfeeevent'&&key(d.creator)===this.c.creator&&[key(NATIVE_MINT),key(PublicKey.default)].includes(key(d.quoteMint))) engine.addFee({id,time,amount:d.creatorFee.toString(),signature});
         if(event.name==='collectcoincreatorfeeevent'&&key(d.coinCreator)===this.c.creator) {
@@ -125,11 +130,24 @@ export class Chain {
     await this.scan(this.c.mint,engine);
     // Curve and pool address streams also cover legacy swaps that omit the quote mint.
     for(const pair of engine.s.all('SELECT * FROM pairs')) {
+      // The parent mint stream discovers children launched against that pair.
+      await this.scan(pair.mint,engine);
       await this.scan(key(bondingCurvePda(new PublicKey(pair.mint))),engine);
       const pool=canonicalPumpPoolPdaWithQuote(new PublicKey(pair.mint),this.mint);
       if(await this.connection.getAccountInfo(pool)) {
         engine.s.run('UPDATE pairs SET pool=? WHERE mint=?',key(pool),pair.mint);
         await this.scan(key(pool),engine);
+      }
+    }
+    // Verify fee sharing afresh and index only authenticated Pump distribution events.
+    for(const pair of engine.s.all('SELECT * FROM nested_pairs')) {
+      try {
+        await this.scan(pair.mint,engine);
+        const valid=this.c.nestedFeeWallet?await verifyNestedPair(this,pair,this.c.nestedFeeWallet):false;
+        engine.s.run('INSERT INTO nested_verification VALUES (?,?,?,?) ON CONFLICT(mint) DO UPDATE SET wallet=excluded.wallet,valid=excluded.valid,checked=excluded.checked',pair.mint,this.c.nestedFeeWallet||'',valid?1:0,Math.floor(Date.now()/1000));
+      } catch(error) {
+        engine.s.run('INSERT INTO nested_verification VALUES (?,?,0,?) ON CONFLICT(mint) DO UPDATE SET valid=0,checked=excluded.checked',pair.mint,this.c.nestedFeeWallet||'',Math.floor(Date.now()/1000));
+        // A verification outage hides this listing; it cannot qualify using stale proof.
       }
     }
     if(this.creator)await this.scan(this.c.creator,engine);
@@ -157,7 +175,8 @@ export class Chain {
   }
   async instructions(job) {
     const user=this.signer.publicKey, amount=new BN(job.amount), details={};
-    if(job.kind==='reward')return {instructions:[SystemProgram.transfer({fromPubkey:user,toPubkey:new PublicKey(job.recipient),lamports:BigInt(job.amount)})],details};
+    if(job.kind==='pair_burn')return this.pairBurnInstructions(job);
+    if(!['collect','buyback','pair_funding'].includes(job.kind))throw new Error('Unsupported job kind; developer payouts are disabled');
     const state=await this.mainState();
     if(job.kind==='collect') {
       const instructions=[];
@@ -166,37 +185,65 @@ export class Chain {
       instructions.push(...await this.pump.collectCoinCreatorFeeV2Instructions(this.creator,NATIVE_MINT,TOKEN_PROGRAM_ID,user));
       return {instructions,details};
     }
-    if(job.kind!=='buyback')throw new Error('Unknown job kind');
+
+    const built=await this.buy(this.mint,NATIVE_MINT,state,TOKEN_PROGRAM_ID,amount,user);
+    if(job.kind==='buyback')this.appendBurn(built,this.mint,state,user);
+    return {instructions:built.instructions,details:{mint:this.c.mint,decimals:state.mint.decimals,...(job.kind==='buyback'?{burned:built.base.toString()}:{acquired:built.base.toString(),targetMint:job.recipient})}};
+  }
+  async buy(mint,quoteMint,state,quoteTokenProgram,amount,user) {
     let base,instructions;
     const quoteBudget=amount.muln(10000-this.c.slippageBps).divn(10000);
     if(state.pool) {
       const swap=await this.amm.swapSolanaState(state.poolKey,user);
       const p=swap.pool;
+      if(!p.baseMint.equals(mint)||!p.quoteMint.equals(quoteMint))throw new Error('Unexpected pool mints');
       const quote=buyQuoteInput({quote:quoteBudget,slippage:0,baseReserve:swap.poolBaseAmount,quoteReserve:swap.poolQuoteAmount,virtualQuoteReserves:p.virtualQuoteReserves,globalConfig:swap.globalConfig,baseMintAccount:swap.baseMintAccount,baseMint:swap.baseMint,coinCreator:p.coinCreator,creator:p.creator,feeConfig:swap.feeConfig,quoteMint:p.quoteMint,isMayhemMode:p.isMayhemMode,creatorFeeBps:p.creatorFeeBps,quoteTransferFee:swap.quoteTransferFee});
       base=quote.base;
-      instructions=await PUMP_AMM_SDK.buyInstructions(swap,base,amount);
+      instructions=quoteMint.equals(NATIVE_MINT)?await PUMP_AMM_SDK.buyInstructions(swap,base,amount):await PUMP_AMM_SDK.buyV2Instructions(swap,base,amount);
     } else {
-      if(state.curve.complete)throw new Error('Awaiting main coin migration pool');
+      if(state.curve.complete)throw new Error('Awaiting token migration pool');
       const global=await this.pump.fetchGlobal(),feeConfig=await this.pump.fetchFeeConfig();
-      const buy=await this.pump.fetchBuyState(this.mint,user,state.tokenProgram);
-      base=getBuyTokenAmountFromSolAmount({global,feeConfig,mintSupply:new BN(state.mint.supply.toString()),bondingCurve:buy.bondingCurve,amount:quoteBudget,quoteMint:NATIVE_MINT,creatorFeeBps:buy.bondingCurve.creatorFeeBps});
-      instructions=await PUMP_SDK.buyInstructions({...buy,global,mint:this.mint,user,amount:base,solAmount:amount,slippage:0,tokenProgram:state.tokenProgram});
+      const buy=await this.pump.fetchBuyState(mint,user,state.tokenProgram,quoteMint);
+      const expectedQuote=[key(PublicKey.default),key(NATIVE_MINT)].includes(key(buy.bondingCurve.quoteMint))?NATIVE_MINT:buy.bondingCurve.quoteMint;
+      if(!expectedQuote.equals(quoteMint))throw new Error('Unexpected bonding curve quote');
+      base=getBuyTokenAmountFromSolAmount({global,feeConfig,mintSupply:new BN(state.mint.supply.toString()),bondingCurve:buy.bondingCurve,amount:quoteBudget,quoteMint,creatorFeeBps:buy.bondingCurve.creatorFeeBps});
+      const args={...buy,global,mint,user,amount:base,slippage:0,tokenProgram:state.tokenProgram};
+      instructions=quoteMint.equals(NATIVE_MINT)?await PUMP_SDK.buyInstructions({...args,solAmount:amount}):await PUMP_SDK.buyV2Instructions({...args,quoteAmount:amount,quoteTokenProgram});
     }
     if(base.lten(0))throw new Error('Buyback quote rounds to zero');
-    // Exact-output buy + burn are atomic. If the buy or burn fails, neither commits.
-    instructions.push(createBurnCheckedInstruction(getAssociatedTokenAddressSync(this.mint,user,true,state.tokenProgram),this.mint,user,BigInt(base.toString()),state.mint.decimals,[],state.tokenProgram));
-    details.burned=base.toString();
-    return {instructions,details};
+    return {instructions,base};
+  }
+  appendBurn(built,mint,state,user) {
+    built.instructions.push(createBurnCheckedInstruction(getAssociatedTokenAddressSync(mint,user,true,state.tokenProgram),mint,user,BigInt(built.base.toString()),state.mint.decimals,[],state.tokenProgram));
+  }
+  async pairState(mint) {
+    if(mint.equals(this.mint))throw new Error('Pair must differ from main Coin');
+    const info=await this.connection.getAccountInfo(mint);
+    if(!info||![key(TOKEN_PROGRAM_ID),key(TOKEN_2022_PROGRAM_ID)].includes(key(info.owner)))throw new Error('Invalid paired mint');
+    const account=await getMint(this.connection,mint,'finalized',info.owner);
+    if(getTransferFeeConfig(account))throw new Error('Transfer-fee paired tokens are unsupported');
+    const curve=await this.pump.fetchBondingCurve(mint);
+    if(!curve.quoteMint.equals(this.mint))throw new Error('Token is not paired with Coin');
+    const poolKey=canonicalPumpPoolPdaWithQuote(mint,this.mint);
+    const pool=await this.connection.getAccountInfo(poolKey)?await this.amm.fetchPool(poolKey):null;
+    return {mint:account,tokenProgram:info.owner,curve,pool,poolKey};
+  }
+  async pairBurnInstructions(job) {
+    const mint=new PublicKey(job.recipient),user=this.signer.publicKey;
+    const main=await this.mainState(),state=await this.pairState(mint);
+    const built=await this.buy(mint,this.mint,state,main.tokenProgram,new BN(job.amount),user);
+    this.appendBurn(built,mint,state,user);
+    return {instructions:built.instructions,details:{mint:job.recipient,decimals:state.mint.decimals,burned:built.base.toString(),quoteMint:this.c.mint}};
   }
   async prepare(job) {
     if(!this.c.live||!this.signer)throw new Error('Execution disabled');
     const balanceNumber=await this.connection.getBalance(this.signer.publicKey,'finalized');
     if(!Number.isSafeInteger(balanceNumber))throw new Error('RPC wallet balance exceeds safe integer range');
     const balance=BigInt(balanceNumber);
-    if(balance<BigInt(job.amount)+BigInt(this.c.reserve))throw new Error('Insufficient wallet balance including gas reserve');
+    if(balance<(job.kind==='pair_burn'?0n:BigInt(job.amount))+BigInt(this.c.reserve))throw new Error('Insufficient wallet balance including gas reserve');
     const built=await this.instructions(job);
     const latest=await this.connection.getLatestBlockhash('finalized');
-    const instructions=[ComputeBudgetProgram.setComputeUnitLimit({units:500000}),ComputeBudgetProgram.setComputeUnitPrice({microLamports:this.c.priorityMicroLamports}),...built.instructions];
+    const instructions=[ComputeBudgetProgram.setComputeUnitLimit({units:800000}),ComputeBudgetProgram.setComputeUnitPrice({microLamports:this.c.priorityMicroLamports}),...built.instructions];
     const tx=new VersionedTransaction(new TransactionMessage({payerKey:this.signer.publicKey,recentBlockhash:latest.blockhash,instructions}).compileToV0Message());
     tx.sign([this.signer]);
     const wire=tx.serialize();if(wire.length>1232)throw new Error('Transaction exceeds Solana packet size');
@@ -212,7 +259,7 @@ export class Chain {
     const tx=await this.connection.getTransaction(job.signature,{commitment:'finalized',maxSupportedTransactionVersion:0});
     if(!tx||tx.meta?.err)throw new Error('Finalized receipt unavailable');
     const details=JSON.parse(job.details);
-    if(job.kind==='buyback') {
+    if(['buyback','pair_funding'].includes(job.kind)) {
       let spent=0n;
       for(const e of this.decodeEvents(tx)) {
         if(e.name==='tradeevent'&&key(e.data.user)===this.c.creator&&key(e.data.mint)===this.c.mint&&e.data.isBuy) spent+=BigInt(e.data.solAmount.toString())+BigInt(e.data.fee.toString())+BigInt(e.data.creatorFee.toString());
@@ -221,6 +268,21 @@ export class Chain {
       if(spent<=0n||spent>BigInt(job.amount))throw new Error('Buyback receipt amount cannot be reconciled');
       details.spent=String(spent);details.refund=String(BigInt(job.amount)-spent);
     }
+    if(job.kind==='pair_funding') {
+      const acquired=this.tokenDelta(tx,this.c.mint);
+      if(acquired!==BigInt(details.acquired))throw new Error('Pair funding receipt quantity differs from signed purchase');
+    }
+    if(job.kind==='pair_burn') {
+      const spent=-this.tokenDelta(tx,this.c.mint);
+      if(spent<=0n||spent>BigInt(job.amount))throw new Error('Pair quote spend cannot be reconciled');
+      if(this.tokenDelta(tx,job.recipient)!==0n)throw new Error('Purchased pair tokens were not fully burned');
+      details.quoteSpent=String(spent);details.quoteRefund=String(BigInt(job.amount)-spent);
+    }
     return {tx,details};
+  }
+  tokenDelta(tx,mint) {
+    const sum=rows=>(rows||[]).filter(r=>r.owner===this.c.creator&&r.mint===mint).reduce((n,r)=>n+BigInt(r.uiTokenAmount.amount),0n);
+    if(!tx.meta.preTokenBalances||!tx.meta.postTokenBalances)throw new Error('Missing token balances in finalized receipt');
+    return sum(tx.meta.postTokenBalances)-sum(tx.meta.preTokenBalances);
   }
 }

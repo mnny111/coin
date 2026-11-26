@@ -20,7 +20,21 @@ export async function executeJob(s,chain,job) {
       return;
     }
     const receipt=await chain.receipt(job);
-    s.run("UPDATE jobs SET status='confirmed',details=?,wire=NULL,error=NULL,updated=? WHERE id=?",JSON.stringify(receipt.details),nowSeconds(),job.id);
+    s.transaction(()=>{
+      if(s.get('SELECT status FROM jobs WHERE id=?',job.id)?.status==='confirmed')return;
+      const time=nowSeconds();
+      s.run("UPDATE jobs SET status='confirmed',details=?,wire=NULL,error=NULL,updated=? WHERE id=?",JSON.stringify(receipt.details),time,job.id);
+      if(job.kind==='pair_funding'){
+        const credit=BigInt(s.get('SELECT amount FROM pair_credits WHERE mint=?',job.recipient)?.amount||0);
+        const quote=BigInt(receipt.details.acquired)+credit;
+        s.run('INSERT INTO pair_credits VALUES (?,?) ON CONFLICT(mint) DO UPDATE SET amount=excluded.amount',job.recipient,'0');
+        s.run('INSERT OR IGNORE INTO jobs(id,kind,amount,recipient,round,created,updated) VALUES (?,?,?,?,?,?,?)',job.id+':burn','pair_burn',String(quote),job.recipient,job.round,time,time);
+      }
+      if(job.kind==='pair_burn'){
+        const credit=BigInt(s.get('SELECT amount FROM pair_credits WHERE mint=?',job.recipient)?.amount||0)+BigInt(receipt.details.quoteRefund||0);
+        s.run('INSERT INTO pair_credits VALUES (?,?) ON CONFLICT(mint) DO UPDATE SET amount=excluded.amount',job.recipient,String(credit));
+      }
+    });
     return;
   }
   if(status)return; // Do not replace a processed/confirmed transaction, even if its blockhash expires.
@@ -53,12 +67,12 @@ export async function tick(engine,chain) {
   }
   // One prepared transaction at a time keeps wallet accounting and retries simple.
   if(s.get("SELECT id FROM jobs WHERE status='prepared'"))return;
-  const job=s.get("SELECT * FROM jobs WHERE status='planned' ORDER BY CASE kind WHEN 'collect' THEN 0 WHEN 'reward' THEN 1 ELSE 2 END,created,id LIMIT 1");
+  const job=s.get("SELECT * FROM jobs WHERE status='planned' ORDER BY CASE kind WHEN 'collect' THEN 0 WHEN 'pair_burn' THEN 1 WHEN 'buyback' THEN 2 ELSE 3 END,created,id LIMIT 1");
   if(job) {
     try { await executeJob(s,chain,job); }
     catch(error) {
-      // If preparation failed no tx was broadcast. Once prepared, retain its bytes for reconciliation.
-      s.run('UPDATE jobs SET error=?,updated=? WHERE id=?',String(error.message).slice(0,500),nowSeconds(),job.id);
+      // A bad/illiquid pair must not block all other jobs; preserve its allocation for explicit retry.
+      s.run("UPDATE jobs SET status=CASE WHEN status='planned' THEN 'failed' ELSE status END,error=?,updated=? WHERE id=?",String(error.message).slice(0,500),nowSeconds(),job.id);
       throw error;
     }
   }

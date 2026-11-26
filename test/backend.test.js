@@ -35,18 +35,18 @@ test('deduplicates receipts and trades and rejects unrelated quote mints',t=>{
   assert.equal(e.totals().collected,1000n);assert.equal(e.leaderboard(10800)[0].volume,90071992547409931234n);
   assert.equal(e.addPair({mint:'x',quote:'wrong'}),false);
 });
-test('rounds pay top three new pairs only, preserve exact pot, and settle once',t=>{
-  const e=setup(t);pair(e,'old',10000);trade(e,'old','9999');
+test('rounds include all active pairs, weight by volume, conserve pot and settle once',t=>{
+  const e=setup(t);pair(e,'old',10000);trade(e,'old','1000');
   ['a','b','c','d'].forEach((n,i)=>{pair(e,n);trade(e,n,String(400-i*100));});
   fee(e);e.settle(21720);e.settle(21720);
-  const jobs=e.s.all("SELECT * FROM jobs WHERE kind='reward' ORDER BY id");
-  assert.equal(jobs.length,3);assert.deepEqual(jobs.map(j=>j.amount),['150','90','60']);
-  assert.deepEqual(jobs.map(j=>j.recipient),['dev-a','dev-b','dev-c']);assert.equal(e.totals().availableRewards,0n);
+  const jobs=e.s.all("SELECT * FROM jobs WHERE kind='pair_funding' ORDER BY id");
+  assert.equal(jobs.length,5);assert.deepEqual(jobs.map(j=>j.amount),['150','60','45','30','15']);
+  assert.deepEqual(jobs.map(j=>j.recipient),['old','a','b','c','d']);assert.equal(e.totals().availableRewards,0n);
 });
 test('no eligible pairs rolls pot forward; one winner gets the full pot',t=>{
   const e=setup(t);fee(e);e.settle(21720);assert.equal(e.s.get('SELECT pot FROM rounds').pot,'0');
   pair(e,'a',21601);trade(e,'a','1',21605);e.settle(32520);
-  assert.equal(e.s.get("SELECT amount FROM jobs WHERE kind='reward'").amount,'300');
+  assert.equal(e.s.get("SELECT amount FROM jobs WHERE kind='pair_funding'").amount,'300');
 });
 test('fees from a later round cannot be spent by an earlier round',t=>{
   const e=setup(t);pair(e,'a');trade(e,'a','1');fee(e,'1000',21601);e.settle(21720);
@@ -89,7 +89,7 @@ test('finalized success confirms once and hides signed bytes',async t=>{
 test('known finalized failure cannot be counted as paid',async t=>{
   const e=setup(t);e.job('r','reward','10','dev');await executeJob(e.s,fakeChain(),e.s.get('SELECT * FROM jobs'));
   await executeJob(e.s,fakeChain({status:async()=>({confirmationStatus:'finalized',err:{InstructionError:[0,'error']}})}),e.s.get('SELECT * FROM jobs'));
-  assert.equal(e.s.get('SELECT status FROM jobs').status,'failed');assert.equal(e.totals().paid,0n);
+  assert.equal(e.s.get('SELECT status FROM jobs').status,'failed');assert.equal(e.totals().pairFunded,0n);
 });
 test('expired transaction is rebuilt only when absent after finalized expiry',async t=>{
   const e=setup(t);e.job('r','reward','10','dev');await executeJob(e.s,fakeChain(),e.s.get('SELECT * FROM jobs'));
@@ -137,21 +137,11 @@ test('public API serializes bigints, hides secrets and protects admin actions',a
 });
 test('live execution requires explicit configuration and dedicated creator',()=>{assert.throws(()=>config({EXECUTION_MODE:'live'}),/Live mode requires/);assert.throws(()=>config({SLIPPAGE_BPS:'1001'}),/Invalid/);});
 
-test('real transaction preparation signs exact recipient and amount and simulates before returning',async()=>{
-  const signer=Keypair.generate(),recipient=Keypair.generate().publicKey;
-  const chain=new Chain({...settings(),rpc:'http://127.0.0.1:8899'});chain.c={...chain.c,live:true};chain.signer=signer;
-  let simulated=false;
-  chain.connection={getBalance:async()=>1000000000,getLatestBlockhash:async()=>({blockhash:PublicKey.default.toBase58(),lastValidBlockHeight:100}),simulateTransaction:async(tx,options)=>{assert.equal(options.sigVerify,true);simulated=true;return {value:{err:null}};}};
-  const prepared=await chain.prepare({kind:'reward',amount:'123456',recipient:recipient.toBase58()});
-  assert.equal(simulated,true);
-  const tx=VersionedTransaction.deserialize(Buffer.from(prepared.wire,'base64'));
-  const raw=tx.message.compiledInstructions[2];
-  const ix=new TransactionInstruction({programId:tx.message.staticAccountKeys[raw.programIdIndex],keys:raw.accountKeyIndexes.map(i=>({pubkey:tx.message.staticAccountKeys[i],isSigner:tx.message.isAccountSigner(i),isWritable:tx.message.isAccountWritable(i)})),data:Buffer.from(raw.data)});
-  const transfer=SystemInstruction.decodeTransfer(ix);assert.equal(transfer.toPubkey.toBase58(),recipient.toBase58());assert.equal(BigInt(transfer.lamports),123456n);
-  assert.equal(bs58.encode(tx.signatures[0]),prepared.signature);
-  chain.connection.simulateTransaction=async()=>({value:{err:{InstructionError:[0,'test failure']}}});
-  await assert.rejects(chain.prepare({kind:'reward',amount:'123456',recipient:recipient.toBase58()}),/Simulation rejected/);
+test('legacy developer payments are rejected',async()=>{
+ const chain=new Chain({...settings(),rpc:'http://127.0.0.1:8899'});chain.signer=Keypair.generate();
+ await assert.rejects(chain.instructions({kind:'reward',amount:'1',recipient:creator}),/developer payouts are disabled/);
 });
+
 test('patched JSON-RPC transport works against a real HTTP fixture',async t=>{
   const server=createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const b=JSON.parse(raw);assert.equal(b.method,'getBalance');res.setHeader('Content-Type','application/json');res.end(JSON.stringify({jsonrpc:'2.0',id:b.id,result:{context:{slot:123},value:456}}));});
   await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));

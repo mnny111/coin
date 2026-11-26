@@ -24,7 +24,7 @@ export function createApi(engine) {
     const send=(status,data)=>{res.writeHead(status);res.end(json(data));};
     try {
       const url=new URL(req.url,'http://localhost'),path=url.pathname;
-      const pages=['/','/rewards','/activity','/about'];
+      const pages=['/','/buybacks','/rewards','/activity','/about'];
       const assets={'/app.js':['app.js','text/javascript'],'/styles.css':['styles.css','text/css'],'/favicon.svg':['favicon.svg','image/svg+xml'],'/coin-logo.png':['coin-logo.png','image/png'],'/poppins-bold.ttf':['poppins-bold.ttf','font/ttf']};
       if(req.method==='GET'&&(pages.includes(path)||assets[path])) {
         const [file,type]=assets[path]||['index.html','text/html'];
@@ -37,12 +37,12 @@ export function createApi(engine) {
       const offset=Math.max(0,Number(url.searchParams.get('offset'))||0);
       if(!Number.isInteger(limit)||!Number.isSafeInteger(offset))return send(400,{error:'Invalid pagination'});
       if(req.method==='GET'&&path==='/health')return send(200,{ok:true,name:'Coin',configured:!!(c.mint&&c.creator&&c.rpc&&c.start),execution:c.live?'live':'observe',indexedAt:Number(s.setting('indexedAt'))||null,workerHealthy:nowSeconds()-Number(s.setting('workerHeartbeat')||0)<Math.max(120,c.interval*3)&&!s.setting('workerError')});
-      if(req.method==='GET'&&path==='/api/config')return send(200,{name:c.name,mint:c.mint,decimals:s.setting('coinDecimals')===null?null:Number(s.setting('coinDecimals')),creator:c.creator,execution:c.live?'live':'observe',roundSeconds:c.roundSeconds,buybackBps:c.buybackBps,rewardsBps:c.rewardsBps,treasuryBps:10000-c.buybackBps-c.rewardsBps,winnerWeights:c.winnerWeights,ranking:'quote-token trading volume; coins launched within the round',launchUrl:'https://pump.fun/create',requiresWalletConnection:false});
-      if(req.method==='GET'&&path==='/api/stats')return send(200,{...engine.totals(),pairs:s.get('SELECT COUNT(*) AS n FROM pairs').n,watermark:Number(s.setting('watermark'))||null});
+      if(req.method==='GET'&&path==='/api/config')return send(200,{name:c.name,mint:c.mint,decimals:s.setting('coinDecimals')===null?null:Number(s.setting('coinDecimals')),creator:c.creator,execution:c.live?'live':'observe',roundSeconds:c.roundSeconds,buybackBps:c.buybackBps,rewardsBps:c.rewardsBps,treasuryBps:10000-c.buybackBps-c.rewardsBps,pairBuybackBps:c.rewardsBps,pairPolicy:'all-volume-v1',ranking:'all paired coins with round volume; operator trades excluded',launchUrl:'https://pump.fun/create',requiresWalletConnection:false,nestedListing:{wallet:c.nestedFeeWallet,requiredShareBps:10000,requiresConfirmedDistribution:true}});
+      if(req.method==='GET'&&path==='/api/stats')return send(200,{...engine.totals(),pairs:engine.listedPairs().length,watermark:Number(s.setting('watermark'))||null});
       if(req.method==='GET'&&path==='/api/pairs') {
-        const q=(url.searchParams.get('q')||'').slice(0,100).replace(/[\\%_]/g,'\\$&'),pattern=`%${q}%`;
-        const where="WHERE name LIKE ? ESCAPE '\\' OR symbol LIKE ? ESCAPE '\\' OR mint LIKE ? ESCAPE '\\'";
-        return send(200,{items:s.all(`SELECT * FROM pairs ${where} ORDER BY created DESC,mint LIMIT ? OFFSET ?`,pattern,pattern,pattern,limit,offset),total:s.get(`SELECT COUNT(*) AS n FROM pairs ${where}`,pattern,pattern,pattern).n,limit,offset});
+        const q=(url.searchParams.get('q')||'').slice(0,100).toLowerCase();
+        const items=engine.listedPairs().filter(p=>[p.name,p.symbol,p.mint].some(v=>v.toLowerCase().includes(q))).sort((a,b)=>b.created-a.created||a.mint.localeCompare(b.mint));
+        return send(200,{items:items.slice(offset,offset+limit),total:items.length,limit,offset});
       }
       if(req.method==='GET'&&path==='/api/rounds/current') {
         const start=Math.floor(nowSeconds()/c.roundSeconds)*c.roundSeconds;

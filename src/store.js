@@ -9,6 +9,9 @@ export class Store {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS pairs (mint TEXT PRIMARY KEY, creator TEXT NOT NULL, name TEXT NOT NULL, symbol TEXT NOT NULL, created INTEGER NOT NULL, signature TEXT NOT NULL, pool TEXT UNIQUE);
+      CREATE TABLE IF NOT EXISTS nested_pairs (mint TEXT PRIMARY KEY, parent_mint TEXT NOT NULL REFERENCES pairs(mint), creator TEXT NOT NULL, name TEXT NOT NULL, symbol TEXT NOT NULL, created INTEGER NOT NULL, signature TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS nested_fee_receipts (id TEXT PRIMARY KEY, mint TEXT NOT NULL REFERENCES nested_pairs(mint), recipient TEXT NOT NULL, quote_mint TEXT NOT NULL, amount TEXT NOT NULL, signature TEXT NOT NULL, time INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS nested_verification (mint TEXT PRIMARY KEY REFERENCES nested_pairs(mint), wallet TEXT NOT NULL, valid INTEGER NOT NULL, checked INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS trades (id TEXT PRIMARY KEY, mint TEXT NOT NULL REFERENCES pairs(mint), time INTEGER NOT NULL, amount TEXT NOT NULL, trader TEXT NOT NULL, signature TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS trades_time ON trades(time, mint);
       CREATE TABLE IF NOT EXISTS fees (id TEXT PRIMARY KEY, time INTEGER NOT NULL, amount TEXT NOT NULL, buyback TEXT NOT NULL, rewards TEXT NOT NULL, treasury TEXT NOT NULL, signature TEXT NOT NULL);
@@ -16,6 +19,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, amount TEXT NOT NULL, recipient TEXT, round INTEGER, status TEXT NOT NULL DEFAULT 'planned', signature TEXT, wire TEXT, expiry INTEGER, details TEXT NOT NULL DEFAULT '{}', error TEXT, created INTEGER NOT NULL, updated INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, created);
       CREATE TABLE IF NOT EXISTS lease (id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, expires INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS pair_credits (mint TEXT PRIMARY KEY, amount TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, time INTEGER NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL);
     `);
   }
