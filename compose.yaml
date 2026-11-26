@@ -1,0 +1,21 @@
+services:
+  api:
+    build: .
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      DATABASE_PATH: /app/data/coin.sqlite
+    ports: ["127.0.0.1:3000:3000"]
+    volumes: ["coin-data:/app/data"]
+    restart: unless-stopped
+  worker:
+    build: .
+    command: ["node", "src/worker.js"]
+    env_file: .env
+    environment:
+      DATABASE_PATH: /app/data/coin.sqlite
+    volumes: ["coin-data:/app/data"]
+    restart: unless-stopped
+    # For live mode, add a read-only secret mount and set SIGNER_KEY_FILE to its path.
+volumes:
+  coin-data:

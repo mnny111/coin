@@ -1,0 +1,141 @@
+# Coin backend
+
+An independent implementation of the Coin concept supplied in the conversation. No pairedcoin.family scraping or copied private backend. This deliverable is the backend; frontend design can be added later.
+
+## Implemented behavior
+
+- Discovers Pump launches quoted in your `COIN_MINT`, without developer registration or a website wallet connection.
+- Indexes finalized Pump bonding-curve and canonical PumpSwap trades. Rankings use raw Coin quote-token volume, with buys and sells counted once per event.
+- Collects SOL creator fees from the main Coin's Pump and PumpSwap vaults, including sweeping current curve/pool fee buckets.
+- Allocates collected fees: **60% buyback/burn, 20% developer rewards, 20% retained treasury**. Amounts use integers, never floating-point token arithmetic.
+- Buys main Coin on its SOL curve or canonical SOL pool, then burns the exact purchased quantity in the **same atomic transaction**. Slippage and spend caps apply.
+- Every three hours, freezes the top three eligible new pairs and queues SOL payments to their original on-chain creator addresses.
+- Persists receipts, indexing cursors, rounds, reservations, signed transaction bytes, and payout state in SQLite WAL.
+- Reconciles finalized signatures before reporting success. A timeout rebroadcasts the same signed bytes; it does not create a second payment.
+- Provides public JSON endpoints for a future frontend, with Solscan links for submitted transactions. Admin endpoints require a bearer token.
+
+The SOL → Coin → paired-token trading route belongs to Pump's launch/trading protocol. This backend does not intercept swaps or make arbitrary tokens eligible for quoting; the main coin must meet Pump's current quote-token requirements. Users launch on Pump.fun and select Coin there.
+
+## Explicit assumptions
+
+The original post specifies 60% buyback/burn and 20% developer rewards but leaves the following rules undefined. These are this implementation's defaults, not claims about the reference service:
+
+| Rule | Default |
+| --- | --- |
+| Remaining fees | 20% retained in treasury; no automatic treasury withdrawal |
+| Round boundaries | UTC 00:00–03:00, 03:00–06:00, etc. |
+| New pair eligibility | Launched inside that round, with nonzero trading volume inside it |
+| Ranking | Coin quote-token volume across the Pump curve and canonical PumpSwap pool |
+| Winner allocation | 50% / 30% / 20%; normalize weights if fewer than three winners |
+| No winners | Carry reward funds forward |
+| Multiple coins by one creator | Each coin eligible independently |
+| Recipient | Original creator in the verified launch event |
+| Ties | Earlier creation time, then ascending mint address |
+| Fee timing | A round uses fee receipts collected before its end; later collections fund later rounds |
+| Safety delay | 120 seconds after a round ends, plus completed finalized indexing |
+
+`WINNER_WEIGHTS`, allocation basis points, round duration, and trading limits are configurable. Core accounting policy is bound to the database on first configured use. Changing the mint, creator, start time, percentages or reward policy after that requires a reviewed migration or a fresh database; silently reinterpreting old money is rejected.
+
+Trading-volume ranking is susceptible to wash trading. No Sybil or wash-trade classifier is claimed. A large volume score is not a quality guarantee.
+
+## Run locally
+
+Requires Node.js 24 or later.
+
+```powershell
+npm ci --ignore-scripts
+Copy-Item .env.example .env
+npm start
+```
+
+The API starts at `http://127.0.0.1:3000` with empty data. `/health` explicitly reports that it is unconfigured. It never inserts demonstration trades or fake burns.
+
+Configure these four values in `.env` to start real read-only indexing:
+
+```dotenv
+EXECUTION_MODE=observe
+SOLANA_RPC_URL=https://YOUR_ARCHIVAL_SOLANA_RPC
+COIN_MINT=YOUR_MAIN_COIN_ADDRESS
+CREATOR_ADDRESS=YOUR_DEDICATED_CREATOR_WALLET
+START_TIME=UNIX_SECONDS_AT_OR_BEFORE_YOUR_MAIN_COIN_LAUNCH
+```
+
+Then run the worker in a second terminal:
+
+```powershell
+npm run worker
+```
+
+Or run both processes under one supervisor:
+
+```powershell
+npm run service
+```
+
+Observation mode indexes and calculates rounds/jobs but **never reads a signing key, signs, or broadcasts**. Proposed jobs remain `planned`; they are not successful payouts. When switching to live mode, previously planned rewards are still obligations and will execute. Review the observed rounds before that switch.
+
+The RPC needs full transaction history from `START_TIME`, version-0 transaction support, inner instructions, and finalized block times. Missing transaction bodies stop cursor advancement and settlement. A provider that silently omits historical signatures can produce an incomplete index; use a trusted archival RPC. The polling indexer is intended for an initial deployment; throughput for thousands of active pairs has not been load-tested. A production deployment at that scale should use a durable Geyser/indexing feed and retain the same ledger contracts.
+
+## Enable live execution
+
+Create your own main Coin paired with SOL, using a **dedicated creator wallet**. Pump's creator vaults aggregate fees from every coin using a creator address; the backend cannot attribute a collection to one mint when that wallet is reused. Shared creator-fee configurations, CTO destinations that differ from the configured creator, non-SOL main-coin quotes, and transfer-fee main mints are rejected or unsupported.
+
+Provide a local 64-byte Solana JSON keypair file through a secret mount, not the repository. Fund this wallet separately for transaction fees and token-account rent. Then set:
+
+```dotenv
+EXECUTION_MODE=live
+SIGNER_KEY_FILE=/run/secrets/coin-creator.json
+DEDICATED_CREATOR_CONFIRMED=true
+```
+
+The signer must match `CREATOR_ADDRESS`. Defaults reserve 0.05 SOL for gas, collect at five-minute intervals when at least 0.01 SOL is available, and cap each buyback at 0.1 SOL. Buyback quotes allow 1% slippage inside that budget. The retained 20% can absorb operating costs, but `treasury` in the API is cumulative allocation, not a reconciled spendable wallet balance. Donations/top-ups are not automatically treated as creator fees or reward-pot deposits.
+
+No mainnet transaction has been submitted or verified end to end for this deliverable. Before running live, perform funded validation with your own token and small limits: collection, atomic buy-and-burn, and a developer payment. Never use the reference project's mint or wallets as your deployment settings.
+
+## API contract
+
+All money/token amounts are decimal **strings in base units**. SOL amounts are lamports; trading volume and burned amounts are raw Coin token units. Timestamps are Unix seconds.
+
+| Method | Path | Response |
+| --- | --- | --- |
+| GET | `/health` | API availability, configuration, worker heartbeat, execution mode |
+| GET | `/api/config` | Public addresses, percentages, round rules and Pump launch URL |
+| GET | `/api/stats` | Collected/allocated fees, available reservations, confirmed burns/payouts, pair count |
+| GET | `/api/pairs` | Discovered launches; `limit` and `offset` supported |
+| GET | `/api/rounds/current` | Current boundaries, available pot, provisional leaderboard, index watermark |
+| GET | `/api/rounds` | Immutable historical winner snapshots |
+| GET | `/api/transactions` | Jobs and statuses, signatures, explorer links; no signed transaction bytes |
+| GET | `/api/fees` | Deduplicated collection receipts and explorer links |
+| GET | `/admin/status` | Authenticated worker error and pending job information |
+| POST | `/admin/pause` | `{"paused":true}` stops new executions; indexing and in-flight reconciliation continue |
+| POST | `/admin/retry` | `{"id":"reward:..."}` retries only known finalized failed transactions |
+
+Admin requests require `Authorization: Bearer <ADMIN_TOKEN>` with an operator-supplied token of at least 32 characters. Without a token, all admin requests are denied. Use TLS and a reverse proxy with rate limiting if exposing the API outside localhost. No browser cross-origin permission is enabled by default; serve the later frontend behind the same origin.
+
+Jobs progress `planned → prepared → confirmed` or `prepared → failed`. `prepared` means signed and possibly broadcast, not success. Known finalized failures retain their allocation and require explicit retry. Preparation errors stay planned and retry on the next cycle. Expired signatures are rebuilt only after finalized expiry and a second signature-history check. The transaction audit retains replaced signatures.
+
+## Deploy
+
+For Docker, configure `.env` then use `docker compose up --build -d`. Both containers mount the same local named volume. Add a read-only signing-key secret mount to the worker for live mode. Docker installation uses `--ignore-scripts` intentionally.
+
+For Railway or another container host, deploy **one service replica** with a persistent volume mounted at `/app/data`, start command `node src/service.js`, `HOST=0.0.0.0`, and `DATABASE_PATH=/app/data/coin.sqlite`. Set runtime variables from `.env.example` and mount the keypair file securely. Two separate Railway services cannot share a local SQLite volume; use this combined service or migrate storage to Postgres before separating them. No hosting deployment or account changes were made here.
+
+Back up the SQLite database with a SQLite-aware backup tool, or stop both processes before copying the database and its WAL files. Do not replace the database on a live worker: its transaction journal is what prevents repeat payments.
+
+## Validation and dependency notes
+
+`npm test`: 27 passing tests at delivery. Tests cover integer conservation, ranking and eligibility, rollovers, fee timing, duplicate events, persisted state, transaction timeout/expiry/failure recovery, real HTTP endpoints, SDK event decoding, real Solana transaction construction with mocked RPC simulation, and JSON-RPC transport compatibility. `npm run check` passes.
+
+These are local/fixture tests. They do not prove that current mainnet conditions, account state, fee collection, or buybacks will succeed with your token. No funded mainnet or local-validator end-to-end run was performed.
+
+Pump SDKs are pinned to `@pump-fun/pump-sdk@4.3.1` and `@pump-fun/pump-swap-sdk@2.2.0`. Patched `jayson@5.0.0` and `toml@5.0.1` overrides remove their inherited advisories; a real HTTP fixture verifies the replaced RPC transport. The remaining npm audit findings trace to `bigint-buffer@1.1.5` and its SDK dependency chain (six high-severity package entries). The vulnerable native binding is not built with the documented `--ignore-scripts` installation; this installation uses its JavaScript fallback. Do not run `npm rebuild` to enable that binding. The audit findings remain unresolved upstream; do not interpret this as a clean security audit.
+
+Official integration references:
+
+- https://github.com/pump-fun/pump-public-docs
+- https://github.com/pump-fun/pump-public-docs/blob/main/docs/instructions/COLLECT_CREATOR_FEE.md
+- Installed SDK source and type declarations under `node_modules/@pump-fun/`
+
+## Source layout
+
+`src/config.js` validates runtime configuration. `src/store.js` owns persistence and worker leases. `src/engine.js` owns deterministic money and round rules. `src/chain.js` handles official SDK instructions and finalized event indexing. `src/worker.js` handles scheduling and the durable transaction queue. `src/server.js` exposes JSON APIs. `src/service.js` runs both processes on one persistent disk.
